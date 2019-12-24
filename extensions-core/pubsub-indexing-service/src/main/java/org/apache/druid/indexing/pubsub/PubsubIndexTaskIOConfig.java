@@ -20,12 +20,14 @@
 package org.apache.druid.indexing.pubsub;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
-import com.google.common.base.Optional;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import org.apache.druid.data.input.InputFormat;
-import org.joda.time.DateTime;
+import org.apache.druid.data.input.impl.ParseSpec;
+import org.apache.druid.indexing.pubsub.supervisor.PubsubSupervisorIOConfig;
 import org.apache.druid.segment.indexing.IOConfig;
+import org.joda.time.DateTime;
 
 import javax.annotation.Nullable;
 import java.util.Map;
@@ -52,7 +54,7 @@ public class PubsubIndexTaskIOConfig implements IOConfig
   {
     this.taskGroupId = taskGroupId;
     this.consumerProperties = Preconditions.checkNotNull(consumerProperties, "consumerProperties");
-    this.pollTimeout = pollTimeout != null ? pollTimeout : KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS;
+    this.pollTimeout = pollTimeout != null ? pollTimeout : PubsubSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS;
     this.minimumMessageTime = minimumMessageTime;
     this.maximumMessageTime = maximumMessageTime;
     this.inputFormat = inputFormat;
@@ -74,13 +76,13 @@ public class PubsubIndexTaskIOConfig implements IOConfig
   @JsonProperty
   public Optional<DateTime> getMaximumMessageTime()
   {
-    return maximumMessageTime;
+    return Optional.of(maximumMessageTime);
   }
 
   @JsonProperty
   public Optional<DateTime> getMinimumMessageTime()
   {
-    return minimumMessageTime;
+    return Optional.of(minimumMessageTime);
   }
 
   @Nullable
@@ -92,9 +94,14 @@ public class PubsubIndexTaskIOConfig implements IOConfig
 
   @Nullable
   @JsonProperty("pollTimeout")
-  private long getPollTimeout()
+  public long getPollTimeout()
   {
     return pollTimeout;
+  }
+
+  public InputFormat getInputFormat(ParseSpec parseSpec)
+  {
+    return inputFormat == null ? Preconditions.checkNotNull(parseSpec, "parseSpec").toInputFormat() : inputFormat;
   }
 
   @Override

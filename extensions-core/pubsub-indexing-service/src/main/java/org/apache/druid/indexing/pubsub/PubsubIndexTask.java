@@ -24,24 +24,36 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.druid.indexing.common.LockGranularity;
-import org.apache.druid.data.input.InputRow;
-import com.google.common.base.Preconditions;
 import com.google.common.base.Optional;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import org.apache.druid.data.input.InputRow;
 import org.apache.druid.indexer.TaskStatus;
+import org.apache.druid.indexing.appenderator.ActionBasedSegmentAllocator;
+import org.apache.druid.indexing.appenderator.ActionBasedUsedSegmentChecker;
+import org.apache.druid.indexing.common.LockGranularity;
 import org.apache.druid.indexing.common.TaskToolbox;
+import org.apache.druid.indexing.common.actions.SegmentAllocateAction;
 import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.config.TaskConfig;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.common.task.AbstractTask;
 import org.apache.druid.indexing.common.task.TaskResource;
+import org.apache.druid.indexing.common.task.Tasks;
+import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.java.util.common.parsers.ParseException;
 import org.apache.druid.segment.indexing.DataSchema;
+import org.apache.druid.segment.realtime.FireDepartmentMetrics;
+import org.apache.druid.segment.realtime.appenderator.Appenderator;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
+import org.apache.druid.segment.realtime.appenderator.StreamAppenderatorDriver;
 import org.apache.druid.segment.realtime.firehose.ChatHandler;
 import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
 import org.apache.druid.server.security.AuthorizerMapper;
+import org.apache.druid.timeline.partition.NumberedShardSpecFactory;
 import org.apache.druid.utils.CircularBuffer;
 
 import java.util.HashMap;
@@ -49,6 +61,8 @@ import java.util.Map;
 
 public class PubsubIndexTask extends AbstractTask implements ChatHandler
 {
+  private static final Logger log = new Logger(PubsubIndexTask.class);
+
   private static final String TYPE = "index_pubsub";
 
   protected final DataSchema dataSchema;
@@ -96,7 +110,6 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
         context
     );
     this.configMapper = configMapper;
-    this.ioConfig = ioConfig;
 
     this.dataSchema = Preconditions.checkNotNull(dataSchema, "dataSchema");
     this.tuningConfig = Preconditions.checkNotNull(tuningConfig, "tuningConfig");
@@ -122,7 +135,12 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
     return pollRetryMs;
   }
 
-  @Override
+  @VisibleForTesting
+  void setPollRetryMs(long retryMs)
+  {
+    this.pollRetryMs = retryMs;
+  }
+
   protected PubsubIndexTaskRunner createTaskRunner()
   {
     //noinspection unchecked
@@ -138,14 +156,13 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
     );
   }
 
-  @Override
   protected PubsubRecordSupplier newTaskRecordSupplier()
   {
     ClassLoader currCtxCl = Thread.currentThread().getContextClassLoader();
     try {
       Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
 
-      final Map<String, Object> props = new HashMap<>(((PubsubIndexTaskIOConfig) super.ioConfig).getConsumerProperties());
+      final Map<String, Object> props = new HashMap<>(ioConfig.getConsumerProperties());
 
       props.put("auto.offset.reset", "none");
 
@@ -191,25 +208,16 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
     return !beforeMinimumMessageTime && !afterMaximumMessageTime;
   }
 
-
-  @Override
   @JsonProperty
   public PubsubIndexTaskTuningConfig getTuningConfig()
   {
-    return (PubsubIndexTaskTuningConfig) super.getTuningConfig();
+    return getTuningConfig();
   }
 
-  @VisibleForTesting
-  void setPollRetryMs(long retryMs)
-  {
-    this.pollRetryMs = retryMs;
-  }
-
-  @Override
   @JsonProperty("ioConfig")
   public PubsubIndexTaskIOConfig getIOConfig()
   {
-    return (PubsubIndexTaskIOConfig) super.getIOConfig();
+    return ioConfig;
   }
 
   @Override
@@ -234,5 +242,62 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
   public TaskStatus run(TaskToolbox toolbox) throws Exception
   {
     return null;
+  }
+
+  public DataSchema getDataSchema() {
+    return dataSchema;
+  }
+
+  public Appenderator newAppenderator(FireDepartmentMetrics metrics, TaskToolbox toolbox)
+  {
+    return appenderatorsManager.createRealtimeAppenderatorForTask(
+        getId(),
+        dataSchema,
+        tuningConfig.withBasePersistDirectory(toolbox.getPersistDir()),
+        metrics,
+        toolbox.getSegmentPusher(),
+        toolbox.getJsonMapper(),
+        toolbox.getIndexIO(),
+        toolbox.getIndexMergerV9(),
+        toolbox.getQueryRunnerFactoryConglomerate(),
+        toolbox.getSegmentAnnouncer(),
+        toolbox.getEmitter(),
+        toolbox.getQueryExecutorService(),
+        toolbox.getCache(),
+        toolbox.getCacheConfig(),
+        toolbox.getCachePopulatorStats()
+    );
+  }
+
+
+  public StreamAppenderatorDriver newDriver(
+      final Appenderator appenderator,
+      final TaskToolbox toolbox,
+      final FireDepartmentMetrics metrics
+  )
+  {
+    return new StreamAppenderatorDriver(
+        appenderator,
+        new ActionBasedSegmentAllocator(
+            toolbox.getTaskActionClient(),
+            dataSchema,
+            (schema, row, sequenceName, previousSegmentId, skipSegmentLineageCheck) -> new SegmentAllocateAction(
+                schema.getDataSource(),
+                row.getTimestamp(),
+                schema.getGranularitySpec().getQueryGranularity(),
+                schema.getGranularitySpec().getSegmentGranularity(),
+                sequenceName,
+                previousSegmentId,
+                skipSegmentLineageCheck,
+                NumberedShardSpecFactory.instance(),
+                lockGranularityToUse
+            )
+        ),
+        toolbox.getSegmentHandoffNotifierFactory(),
+        new ActionBasedUsedSegmentChecker(toolbox.getTaskActionClient()),
+        toolbox.getDataSegmentKiller(),
+        toolbox.getJsonMapper(),
+        metrics
+    );
   }
 }

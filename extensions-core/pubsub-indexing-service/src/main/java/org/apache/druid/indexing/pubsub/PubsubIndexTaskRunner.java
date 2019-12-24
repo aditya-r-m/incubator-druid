@@ -19,68 +19,104 @@
 
 package org.apache.druid.indexing.pubsub;
 
-import com.google.common.base.Optional;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Optional;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Supplier;
+import com.google.common.base.Throwables;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.pubsub.v1.ReceivedMessage;
+import org.apache.druid.data.input.Committer;
+import org.apache.druid.data.input.InputEntityReader;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.InputRowSchema;
+import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.data.input.impl.InputRowParser;
+import org.apache.druid.discovery.DiscoveryDruidNode;
+import org.apache.druid.discovery.LookupNodeService;
+import org.apache.druid.discovery.NodeRole;
+import org.apache.druid.indexer.IngestionState;
+import org.apache.druid.indexer.TaskStatus;
+import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
 import org.apache.druid.indexing.common.LockGranularity;
+import org.apache.druid.indexing.common.TaskLockType;
+import org.apache.druid.indexing.common.TaskRealtimeMetricsMonitorBuilder;
 import org.apache.druid.indexing.common.TaskToolbox;
+import org.apache.druid.indexing.common.actions.SegmentLockAcquireAction;
+import org.apache.druid.indexing.common.actions.TimeChunkLockAcquireAction;
 import org.apache.druid.indexing.common.stats.RowIngestionMeters;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
+import org.apache.druid.indexing.common.task.RealtimeIndexTask;
+import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskIOConfig;
+import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskTuningConfig;
+import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
+import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.collect.Utils;
+import org.apache.druid.java.util.common.parsers.CloseableIterator;
+import org.apache.druid.java.util.common.parsers.ParseException;
 import org.apache.druid.java.util.emitter.EmittingLogger;
-import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
-import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
-import org.apache.druid.server.security.AuthorizerMapper;
-import org.apache.druid.utils.CircularBuffer;
+import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.segment.indexing.RealtimeIOConfig;
+import org.apache.druid.segment.realtime.FireDepartment;
+import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.segment.realtime.appenderator.Appenderator;
+import org.apache.druid.segment.realtime.appenderator.AppenderatorDriverAddResult;
+import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
+import org.apache.druid.segment.realtime.appenderator.SegmentsAndMetadata;
 import org.apache.druid.segment.realtime.appenderator.StreamAppenderatorDriver;
+import org.apache.druid.segment.realtime.firehose.ChatHandler;
+import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
+import org.apache.druid.server.security.Action;
+import org.apache.druid.server.security.AuthorizerMapper;
+import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.utils.CircularBuffer;
+import com.google.common.util.concurrent.ListenableFuture;
 import org.joda.time.DateTime;
-import org.apache.druid.indexer.IngestionState;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.atomic.AtomicBoolean;
-import org.apache.druid.indexer.TaskStatus;
-import java.util.concurrent.ExecutionException;
-import org.apache.druid.java.util.common.parsers.ParseException;
 import javax.servlet.http.HttpServletRequest;
-import javax.ws.rs.core.Response;
-
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
 import javax.ws.rs.Path;
 import javax.ws.rs.Produces;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
-import java.util.Objects;
+import javax.ws.rs.core.Response;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 
 /**
  * Pubsub indexing task runner supporting incremental segments publishing
  */
-public class PubsubIndexTaskRunner
+public class PubsubIndexTaskRunner implements ChatHandler
 {
-  public enum Status
-  {
-    NOT_STARTED,
-    STARTING,
-    READING,
-    PAUSED,
-    PUBLISHING
-  }
-
   private static final EmittingLogger log = new EmittingLogger(PubsubIndexTaskRunner.class);
+  protected final AtomicBoolean stopRequested = new AtomicBoolean(false);
+  private final PubsubIndexTaskIOConfig ioConfig;
+  private final PubsubIndexTaskTuningConfig tuningConfig;
   private final PubsubIndexTask task;
   private final InputRowParser<ByteBuffer> parser;
   private final AuthorizerMapper authorizerMapper;
@@ -89,23 +125,9 @@ public class PubsubIndexTaskRunner
   private final RowIngestionMetersFactory rowIngestionMetersFactory;
   private final AppenderatorsManager appenderatorsManager;
   private final LockGranularity lockGranularityToUse;
-
-
-  private volatile DateTime startTime;
-  private volatile Status status = Status.NOT_STARTED; // this is only ever set by the task runner thread (runThread)
-  private volatile TaskToolbox toolbox;
-  private volatile Thread runThread;
-  private volatile Appenderator appenderator;
-  private volatile StreamAppenderatorDriver driver;
-  private volatile IngestionState ingestionState;
-
-  protected volatile boolean pauseRequested = false;
-
   private final InputRowSchema inputRowSchema;
   private final InputFormat inputFormat;
-
   private final RowIngestionMeters rowIngestionMeters;
-
   // The pause lock and associated conditions are to support coordination between the Jetty threads and the main
   // ingestion loop. The goal is to provide callers of the API a guarantee that if pause() returns successfully
   // the ingestion loop has been stopped at the returned sequences and will not ingest any more data until resumed. The
@@ -124,9 +146,19 @@ public class PubsubIndexTaskRunner
   private final Lock pauseLock = new ReentrantLock();
   private final Condition hasPaused = pauseLock.newCondition();
   private final Condition shouldResume = pauseLock.newCondition();
-
-  protected final AtomicBoolean stopRequested = new AtomicBoolean(false);
   private final AtomicBoolean publishOnStop = new AtomicBoolean(false);
+  protected volatile boolean pauseRequested = false;
+  private volatile DateTime startTime;
+  private volatile Status status = Status.NOT_STARTED; // this is only ever set by the task runner thread (runThread)
+  private volatile TaskToolbox toolbox;
+  private volatile Thread runThread;
+  private volatile Appenderator appenderator;
+  private volatile StreamAppenderatorDriver driver;
+  private volatile IngestionState ingestionState;
+  private final List<com.google.common.util.concurrent.ListenableFuture<SegmentsAndMetadata>> publishWaitList = new ArrayList<>();
+  private final List<com.google.common.util.concurrent.ListenableFuture<SegmentsAndMetadata>> handOffWaitList = new ArrayList<>();
+  protected final Lock pollRetryLock = new ReentrantLock();
+  protected final Condition isAwaitingRetry = pollRetryLock.newCondition();
 
   PubsubIndexTaskRunner(
       PubsubIndexTask task,
@@ -140,6 +172,8 @@ public class PubsubIndexTaskRunner
   )
   {
     this.task = task;
+    this.ioConfig = task.getIOConfig();
+    this.tuningConfig = task.getTuningConfig();
     this.parser = parser;
     this.authorizerMapper = authorizerMapper;
     this.chatHandlerProvider = chatHandlerProvider;
@@ -177,7 +211,7 @@ public class PubsubIndexTaskRunner
     catch (Exception e) {
       log.error(e, "Encountered exception while running task.");
       final String errorMsg = Throwables.getStackTraceAsString(e);
-      toolbox.getTaskReportFileWriter().write(task.getId(), getTaskCompletionReports(errorMsg));
+      // toolbox.getTaskReportFileWriter().write(task.getId(), getTaskCompletionReports(errorMsg));
       return TaskStatus.failure(
           task.getId(),
           errorMsg
@@ -186,8 +220,7 @@ public class PubsubIndexTaskRunner
   }
 
   @Nonnull
-  @Override
-  protected List<Object> getRecords(
+  protected List<ReceivedMessage> getRecords(
       PubsubRecordSupplier recordSupplier,
       TaskToolbox toolbox
   ) throws Exception
@@ -195,13 +228,12 @@ public class PubsubIndexTaskRunner
     // Handles OffsetOutOfRangeException, which is thrown if the seeked-to
     // offset is not present in the topic-partition. This can happen if we're asking a task to read from data
     // that has not been written yet (which is totally legitimate). So let's wait for it to show up.
-    List<Objecy> records = new ArrayList<>();
+    List<ReceivedMessage> records = new ArrayList<>();
     try {
       records = recordSupplier.poll(task.getIOConfig().getPollTimeout());
     }
-    catch (OffsetOutOfRangeException e) {
+    catch (Exception e) {
       log.warn("OffsetOutOfRangeException with message [%s]", e.getMessage());
-      possiblyResetOffsetsOrWait(e.offsetOutOfRangePartitions(), recordSupplier, toolbox);
     }
 
     return records;
@@ -333,25 +365,25 @@ public class PubsubIndexTaskRunner
             break;
           }
 
-          if (backgroundThreadException != null) {
-            throw new RuntimeException(backgroundThreadException);
-          }
+          //if (backgroundThreadException != null) {
+          //  throw new RuntimeException(backgroundThreadException);
+          //}
 
           checkPublishAndHandoffFailure();
 
           // calling getRecord() ensures that exceptions specific to kafka/kinesis like OffsetOutOfRangeException
           // are handled in the subclasses.
-          List<Object> records = getRecords(
+          List<ReceivedMessage> records = getRecords(
               recordSupplier,
               toolbox
           );
 
-          for (Object record : records) {
+          for (ReceivedMessage record : records) {
             final boolean shouldProcess = true;
 
             if (shouldProcess) {
               try {
-                final List<byte[]> valueBytess = record.getData();
+                final List<byte[]> valueBytess = Lists.asList(record.getMessage().getData().toByteArray(), null);
                 final List<InputRow> rows;
                 if (valueBytess == null || valueBytess.isEmpty()) {
                   rows = Utils.nullableListOf((InputRow) null);
@@ -412,7 +444,7 @@ public class PubsubIndexTaskRunner
                         public void onFailure(Throwable t)
                         {
                           log.error("Persist failed, dying");
-                          backgroundThreadException = t;
+                          // backgroundThreadException = t;
                         }
                       }
                   );
@@ -422,9 +454,6 @@ public class PubsubIndexTaskRunner
                 handleParseException(e, record);
               }
             }
-          }
-
-          if (System.currentTimeMillis() > nextCheckpointTime) {
           }
 
           if (stillReading) {
@@ -452,22 +481,22 @@ public class PubsubIndexTaskRunner
         }
       }
 
-      synchronized (statusLock) {
+      /*synchronized (statusLock) {
         if (stopRequested.get() && !publishOnStop.get()) {
           throw new InterruptedException("Stopping without publishing");
         }
 
         status = Status.PUBLISHING;
-      }
+      }*/
 
-      publishAndRegisterHandoff(sequenceMetadata);
+      // publishAndRegisterHandoff(sequenceMetadata);
 
-      if (backgroundThreadException != null) {
-        throw new RuntimeException(backgroundThreadException);
-      }
+      // if (backgroundThreadException != null) {
+      //  throw new RuntimeException(backgroundThreadException);
+      // }
 
       // Wait for publish futures to complete.
-      Futures.allAsList(publishWaitList).get();
+      // Futures.allAsList(publishWaitList).get();
 
       // Wait for handoff futures to complete.
       // Note that every publishing task (created by calling AppenderatorDriver.publish()) has a corresponding
@@ -475,7 +504,7 @@ public class PubsubIndexTaskRunner
       // failed to persist sequences. It might also return null if handoff failed, but was recoverable.
       // See publishAndRegisterHandoff() for details.
       List<SegmentsAndMetadata> handedOffList = Collections.emptyList();
-      if (tuningConfig.getHandoffConditionTimeout() == 0) {
+      /*if (tuningConfig.getHandoffConditionTimeout() == 0) {
         handedOffList = Futures.allAsList(handOffWaitList).get();
       } else {
         try {
@@ -490,7 +519,7 @@ public class PubsubIndexTaskRunner
              .addData("handoffConditionTimeout", tuningConfig.getHandoffConditionTimeout())
              .emit();
         }
-      }
+      }*/
 
       for (SegmentsAndMetadata handedOff : handedOffList) {
         log.info(
@@ -506,8 +535,8 @@ public class PubsubIndexTaskRunner
       // the final publishing.
       caughtExceptionOuter = e;
       try {
-        Futures.allAsList(publishWaitList).cancel(true);
-        Futures.allAsList(handOffWaitList).cancel(true);
+        // Futures.allAsList(publishWaitList).cancel(true);
+        // Futures.allAsList(handOffWaitList).cancel(true);
         if (appenderator != null) {
           appenderator.closeNow();
         }
@@ -531,7 +560,7 @@ public class PubsubIndexTaskRunner
     catch (Exception e) {
       // (3) catch all other exceptions thrown for the whole ingestion steps including the final publishing.
       caughtExceptionOuter = e;
-      try {
+      /*try {
         Futures.allAsList(publishWaitList).cancel(true);
         Futures.allAsList(handOffWaitList).cancel(true);
         if (appenderator != null) {
@@ -540,7 +569,7 @@ public class PubsubIndexTaskRunner
       }
       catch (Exception e2) {
         e.addSuppressed(e2);
-      }
+      }*/
       throw e;
     }
     finally {
@@ -567,7 +596,7 @@ public class PubsubIndexTaskRunner
       }
     }
 
-    toolbox.getTaskReportFileWriter().write(task.getId(), getTaskCompletionReports(null));
+    // toolbox.getTaskReportFileWriter().write(task.getId(), getTaskCompletionReports(null));
     return TaskStatus.success(task.getId());
   }
 
@@ -642,7 +671,6 @@ public class PubsubIndexTaskRunner
     handOffWaitList.removeAll(handoffFinished);
   }
 
-
   private List<InputRow> parseBytes(List<byte[]> valueBytess) throws IOException
   {
     if (parser != null) {
@@ -651,7 +679,6 @@ public class PubsubIndexTaskRunner
       return parseWithInputFormat(valueBytess);
     }
   }
-
 
   private List<InputRow> parseWithParser(List<byte[]> valueBytess)
   {
@@ -708,17 +735,9 @@ public class PubsubIndexTaskRunner
       @Context final HttpServletRequest req
   )
   {
-    authorizationCheck(req, Action.READ);
-    return getCheckpoints();
-  }
-
-  private Map<Integer, Object> getCheckpoints()
-  {
-    return new TreeMap<>(sequences.stream()
-                                  .collect(Collectors.toMap(
-                                      SequenceMetadata::getSequenceId,
-                                      SequenceMetadata::getStartOffsets
-                                  )));
+    // authorizationCheck(req, Action.READ);
+    // return getCheckpoints();
+    return null;
   }
 
   /**
@@ -735,7 +754,7 @@ public class PubsubIndexTaskRunner
       @Context final HttpServletRequest req
   ) throws InterruptedException
   {
-    authorizationCheck(req, Action.WRITE);
+    // authorizationCheck(req, Action.WRITE);
     return pause();
   }
 
@@ -779,7 +798,7 @@ public class PubsubIndexTaskRunner
     }
 
     try {
-      return Response.ok().entity(toolbox.getJsonMapper().writeValueAsString(getCurrentOffsets())).build();
+      return Response.ok().entity(toolbox.getJsonMapper().writeValueAsString("TODO: res")).build();
     }
     catch (JsonProcessingException e) {
       throw new RuntimeException(e);
@@ -790,11 +809,10 @@ public class PubsubIndexTaskRunner
   @Path("/resume")
   public Response resumeHTTP(@Context final HttpServletRequest req) throws InterruptedException
   {
-    authorizationCheck(req, Action.WRITE);
+    // authorizationCheck(req, Action.WRITE);
     resume();
     return Response.status(Response.Status.OK).build();
   }
-
 
   @VisibleForTesting
   public void resume() throws InterruptedException
@@ -817,14 +835,23 @@ public class PubsubIndexTaskRunner
     }
   }
 
-
   @GET
   @Path("/time/start")
   @Produces(MediaType.APPLICATION_JSON)
   public DateTime getStartTime(@Context final HttpServletRequest req)
   {
-    authorizationCheck(req, Action.WRITE);
+    // authorizationCheck(req, Action.WRITE);
     return startTime;
+  }
+
+
+  public enum Status
+  {
+    NOT_STARTED,
+    STARTING,
+    READING,
+    PAUSED,
+    PUBLISHING
   }
 }
 

@@ -24,6 +24,17 @@ import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManagerConfi
 
 public class PubsubSupervisorStateManager extends SupervisorStateManager
 {
+  public PubsubSupervisorStateManager(SupervisorStateManagerConfig supervisorConfig, boolean suspended)
+  {
+    super(supervisorConfig, suspended);
+  }
+
+  @Override
+  protected State getSpecificUnhealthySupervisorState()
+  {
+    return BasicState.UNHEALTHY_SUPERVISOR;
+  }
+
   public enum PubsubState implements State
   {
     UNABLE_TO_CONNECT_TO_STREAM(false, true),
@@ -59,17 +70,6 @@ public class PubsubSupervisorStateManager extends SupervisorStateManager
     {
       return healthy ? BasicState.RUNNING : BasicState.UNHEALTHY_SUPERVISOR;
     }
-  }
-
-  public PubsubSupervisorStateManager(SupervisorStateManagerConfig supervisorConfig, boolean suspended)
-  {
-    super(supervisorConfig, suspended);
-  }
-
-  @Override
-  protected State getSpecificUnhealthySupervisorState()
-  {
-    return BasicState.UNHEALTHY_SUPERVISOR;
   }
 
 }

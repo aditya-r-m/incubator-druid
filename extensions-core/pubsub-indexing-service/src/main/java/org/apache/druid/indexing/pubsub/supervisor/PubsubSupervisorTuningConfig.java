@@ -33,43 +33,16 @@ import java.io.File;
 public class PubsubSupervisorTuningConfig extends PubsubIndexTaskTuningConfig
 {
   private static final String DEFAULT_OFFSET_FETCH_PERIOD = "PT30S";
-
   private final Integer workerThreads;
   private final Integer chatThreads;
   private final Long chatRetries;
   private final Duration httpTimeout;
   private final Duration shutdownTimeout;
   private final Duration offsetFetchPeriod;
-
-  public static PubsubSupervisorTuningConfig defaultConfig()
-  {
-    return new PubsubSupervisorTuningConfig(
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
-    );
-  }
+  int DEFAULT_CHAT_RETRIES = 8;
+  String DEFAULT_HTTP_TIMEOUT = "PT10S";
+  String DEFAULT_SHUTDOWN_TIMEOUT = "PT80S";
+  String DEFAULT_REPARTITION_TRANSITION_DURATION = "PT2M";
 
   public PubsubSupervisorTuningConfig(
       @JsonProperty("maxRowsInMemory") Integer maxRowsInMemory,
@@ -122,46 +95,76 @@ public class PubsubSupervisorTuningConfig extends PubsubIndexTaskTuningConfig
     this.workerThreads = workerThreads;
     this.chatThreads = chatThreads;
     this.chatRetries = (chatRetries != null ? chatRetries : DEFAULT_CHAT_RETRIES);
-    this.httpTimeout = SeekableStreamSupervisorTuningConfig.defaultDuration(httpTimeout, DEFAULT_HTTP_TIMEOUT);
-    this.shutdownTimeout = SeekableStreamSupervisorTuningConfig.defaultDuration(
+    this.httpTimeout = PubsubSupervisorTuningConfig.defaultDuration(httpTimeout, DEFAULT_HTTP_TIMEOUT);
+    this.shutdownTimeout = PubsubSupervisorTuningConfig.defaultDuration(
         shutdownTimeout,
         DEFAULT_SHUTDOWN_TIMEOUT
     );
-    this.offsetFetchPeriod = SeekableStreamSupervisorTuningConfig.defaultDuration(
+    this.offsetFetchPeriod = PubsubSupervisorTuningConfig.defaultDuration(
         offsetFetchPeriod,
         DEFAULT_OFFSET_FETCH_PERIOD
     );
   }
 
-  @Override
+  public static PubsubSupervisorTuningConfig defaultConfig()
+  {
+    return new PubsubSupervisorTuningConfig(
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+    );
+  }
+
+  static Duration defaultDuration(final Period period, final String theDefault)
+  {
+    return (period == null ? new Period(theDefault) : period).toStandardDuration();
+  }
+
   @JsonProperty
   public Integer getWorkerThreads()
   {
     return workerThreads;
   }
 
-  @Override
   @JsonProperty
   public Integer getChatThreads()
   {
     return chatThreads;
   }
 
-  @Override
   @JsonProperty
   public Long getChatRetries()
   {
     return chatRetries;
   }
 
-  @Override
   @JsonProperty
   public Duration getHttpTimeout()
   {
     return httpTimeout;
   }
 
-  @Override
   @JsonProperty
   public Duration getShutdownTimeout()
   {
@@ -203,7 +206,6 @@ public class PubsubSupervisorTuningConfig extends PubsubIndexTaskTuningConfig
            '}';
   }
 
-  @Override
   public PubsubIndexTaskTuningConfig convertToTaskTuningConfig()
   {
     return new PubsubIndexTaskTuningConfig(

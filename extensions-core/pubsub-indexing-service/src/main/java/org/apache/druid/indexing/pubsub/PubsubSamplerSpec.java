@@ -19,68 +19,57 @@
 
 package org.apache.druid.indexing.pubsub;
 
+import com.fasterxml.jackson.annotation.JacksonInject;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
 import org.apache.druid.data.input.ByteBufferInputRowParser;
 import org.apache.druid.data.input.FiniteFirehoseFactory;
 import org.apache.druid.data.input.Firehose;
 import org.apache.druid.data.input.FirehoseFactoryToInputSourceAdaptor;
-import com.fasterxml.jackson.annotation.JacksonInject;
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.druid.indexing.overlord.sampler.SamplerSpec;
-import org.apache.druid.indexing.overlord.sampler.InputSourceSampler;
-import org.apache.druid.indexing.overlord.sampler.SamplerConfig;
-import org.apache.druid.indexing.pubsub.supervisor.PubsubSupervisorIOConfig;
-import org.apache.druid.indexing.pubsub.supervisor.PubsubSupervisorSpec;
-import org.apache.druid.indexing.pubsub.supervisor.PubsubSupervisorTuningConfig;
-import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.data.input.InputEntity;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.InputRowListPlusRawValues;
-import org.apache.druid.data.input.impl.InputRowParser;
 import org.apache.druid.data.input.InputSource;
 import org.apache.druid.data.input.InputSplit;
 import org.apache.druid.data.input.SplitHintSpec;
+import org.apache.druid.data.input.impl.ByteEntity;
+import org.apache.druid.data.input.impl.InputRowParser;
+import org.apache.druid.data.input.impl.StringInputRowParser;
+import org.apache.druid.indexing.overlord.sampler.InputSourceSampler;
+import org.apache.druid.indexing.overlord.sampler.SamplerConfig;
 import org.apache.druid.indexing.overlord.sampler.SamplerResponse;
+import org.apache.druid.indexing.overlord.sampler.SamplerSpec;
+import org.apache.druid.indexing.pubsub.supervisor.PubsubSupervisorIOConfig;
+import org.apache.druid.indexing.pubsub.supervisor.PubsubSupervisorSpec;
+import org.apache.druid.indexing.pubsub.supervisor.PubsubSupervisorTuningConfig;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
+import org.apache.druid.java.util.common.parsers.ParseException;
+import org.apache.druid.segment.indexing.DataSchema;
 
-import java.util.HashMap;
 import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 
 public class PubsubSamplerSpec implements SamplerSpec
 {
   static final long POLL_TIMEOUT_MS = 100;
-  private final ObjectMapper objectMapper;
-
-  @Nullable
-  private final DataSchema dataSchema;
-  private final InputSourceSampler inputSourceSampler;
-
   protected final PubsubSupervisorIOConfig ioConfig;
   @Nullable
   protected final PubsubSupervisorTuningConfig tuningConfig;
   protected final SamplerConfig samplerConfig;
-
-  public PubsubSamplerSpec(
-      final PubsubSupervisorSpec ingestionSpec,
-      @Nullable final SamplerConfig samplerConfig,
-      final InputSourceSampler inputSourceSampler
-  )
-  {
-    this.dataSchema = Preconditions.checkNotNull(ingestionSpec, "[spec] is required").getDataSchema();
-    this.ioConfig = Preconditions.checkNotNull(ingestionSpec.getIoConfig(), "[spec.ioConfig] is required");
-    this.tuningConfig = ingestionSpec.getTuningConfig();
-    this.samplerConfig = samplerConfig == null ? SamplerConfig.empty() : samplerConfig;
-    this.inputSourceSampler = inputSourceSampler;
-  }
-
+  private final ObjectMapper objectMapper;
+  @Nullable
+  private final DataSchema dataSchema;
+  private final InputSourceSampler inputSourceSampler;
 
   @JsonCreator
   public PubsubSamplerSpec(
@@ -90,7 +79,11 @@ public class PubsubSamplerSpec implements SamplerSpec
       @JacksonInject ObjectMapper objectMapper
   )
   {
-    this(ingestionSpec, samplerConfig, inputSourceSampler);
+    this.dataSchema = Preconditions.checkNotNull(ingestionSpec, "[spec] is required").getDataSchema();
+    this.ioConfig = Preconditions.checkNotNull(ingestionSpec.getIoConfig(), "[spec.ioConfig] is required");
+    this.tuningConfig = ingestionSpec.getTuningConfig();
+    this.samplerConfig = samplerConfig == null ? SamplerConfig.empty() : samplerConfig;
+    this.inputSourceSampler = inputSourceSampler;
 
     this.objectMapper = objectMapper;
   }
@@ -107,8 +100,8 @@ public class PubsubSamplerSpec implements SamplerSpec
       );
       inputFormat = null;
     } else {
-      inputSource = new RecordSupplierInputSource<>(
-          ioConfig.getStream(),
+      inputSource = new PubsubRecordSupplierInputSource(
+          ioConfig.getSubscription(),
           createRecordSupplier(),
           ioConfig.isUseEarliestSequenceNumber()
       );
@@ -119,6 +112,25 @@ public class PubsubSamplerSpec implements SamplerSpec
     }
 
     return inputSourceSampler.sample(inputSource, inputFormat, dataSchema, samplerConfig);
+  }
+
+  protected PubsubRecordSupplier createRecordSupplier()
+  {
+    ClassLoader currCtxCl = Thread.currentThread().getContextClassLoader();
+    try {
+      Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
+
+      final Map<String, Object> props = new HashMap<>(ioConfig.getConsumerProperties());
+
+      props.put("enable.auto.commit", "false");
+      props.put("auto.offset.reset", "none");
+      props.put("request.timeout.ms", Integer.toString(samplerConfig.getTimeoutMs()));
+
+      return new PubsubRecordSupplier(props, objectMapper);
+    }
+    finally {
+      Thread.currentThread().setContextClassLoader(currCtxCl);
+    }
   }
 
   private class PubsubSamplerFirehoseFactory implements FiniteFirehoseFactory<ByteBufferInputRowParser, Object>
@@ -172,8 +184,8 @@ public class PubsubSamplerSpec implements SamplerSpec
         ((StringInputRowParser) parser).startFileFromBeginning();
       }
 
-      RecordSupplierInputSource<PartitionIdType, SequenceOffsetType> inputSource = new RecordSupplierInputSource<>(
-          ioConfig.getStream(),
+      PubsubRecordSupplierInputSource inputSource = new PubsubRecordSupplierInputSource(
+          ioConfig.getSubscription(),
           createRecordSupplier(),
           ioConfig.isUseEarliestSequenceNumber()
       );
@@ -222,26 +234,6 @@ public class PubsubSamplerSpec implements SamplerSpec
     public void close() throws IOException
     {
       entityIterator.close();
-    }
-  }
-
-  @Override
-  protected PubsubRecordSupplier createRecordSupplier()
-  {
-    ClassLoader currCtxCl = Thread.currentThread().getContextClassLoader();
-    try {
-      Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
-
-      final Map<String, Object> props = new HashMap<>(((PubsubSupervisorIOConfig) ioConfig).getConsumerProperties());
-
-      props.put("enable.auto.commit", "false");
-      props.put("auto.offset.reset", "none");
-      props.put("request.timeout.ms", Integer.toString(samplerConfig.getTimeoutMs()));
-
-      return new PubsubRecordSupplier(props, objectMapper);
-    }
-    finally {
-      Thread.currentThread().setContextClassLoader(currCtxCl);
     }
   }
 }

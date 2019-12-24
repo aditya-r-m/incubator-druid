@@ -19,23 +19,48 @@
 
 package org.apache.druid.indexing.pubsub.supervisor;
 
+import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Optional;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Predicate;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
+import org.apache.druid.indexer.TaskLocation;
+import org.apache.druid.indexer.TaskStatus;
+import org.apache.druid.indexing.common.IndexTaskClient;
+import org.apache.druid.indexing.common.TaskInfoProvider;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import org.apache.druid.indexing.overlord.TaskMaster;
+import org.apache.druid.indexing.overlord.TaskRunner;
+import org.apache.druid.indexing.overlord.TaskRunnerWorkItem;
 import org.apache.druid.indexing.overlord.TaskStorage;
 import org.apache.druid.indexing.overlord.supervisor.Supervisor;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorReport;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManager;
+import org.apache.druid.indexing.pubsub.PubsubIndexTaskClient;
 import org.apache.druid.indexing.pubsub.PubsubIndexTaskClientFactory;
+import org.apache.druid.indexing.pubsub.PubsubIndexTaskTuningConfig;
+import org.apache.druid.indexing.pubsub.PubsubRecordSupplier;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.server.metrics.DruidMonitorSchedulerConfig;
+import org.joda.time.DateTime;
 
-import java.util.Map;
 import javax.annotation.Nullable;
+import java.util.Map;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Supervisor responsible for managing the PubsubIndexTasks for a single dataSource. At a high level, the class accepts a
@@ -46,30 +71,58 @@ import javax.annotation.Nullable;
  */
 public class PubsubSupervisor implements Supervisor
 {
+
   private static final EmittingLogger log = new EmittingLogger(PubsubSupervisor.class);
   private static final long MINIMUM_GET_OFFSET_PERIOD_MILLIS = 5000;
   private static final long INITIAL_GET_OFFSET_DELAY_MILLIS = 15000;
   private static final long INITIAL_EMIT_LAG_METRIC_DELAY_MILLIS = 25000;
   private static final Long NOT_SET = -1L;
   private static final Long END_OF_PARTITION = Long.MAX_VALUE;
-
+  private static final long MINIMUM_FUTURE_TIMEOUT_IN_SECONDS = 120;
+  protected final PubsubSupervisorStateManager stateManager;
+  protected final ObjectMapper sortingMapper;
+  protected final String dataSource;
   private final ServiceEmitter emitter;
   private final DruidMonitorSchedulerConfig monitorSchedulerConfig;
-  private volatile Map<Integer, Long> latestSequenceFromStream;
-  protected final PubsubSupervisorStateManager stateManager;
-
   private final PubsubSupervisorSpec spec;
+  private final TaskStorage taskStorage;
+  private final TaskMaster taskMaster;
+  private final PubsubIndexTaskClient taskClient;
+  private final String supervisorId;
+  private final TaskInfoProvider taskInfoProvider;
+  private final long futureTimeoutInSeconds; // how long to wait for async operations to complete
+  private final RowIngestionMetersFactory rowIngestionMetersFactory;
+  private final ExecutorService exec;
+  private final IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator;
+  private final ScheduledExecutorService scheduledExec;
+  private final ScheduledExecutorService reportingExec;
+  private final ListeningExecutorService workerExec;
+  private final BlockingQueue<Notice> notices = new LinkedBlockingDeque<>();
+  private final Object stopLock = new Object();
+  private final Object stateChangeLock = new Object();
+  private final Object recordSupplierLock = new Object();
+  private final PubsubSupervisorIOConfig ioConfig;
+  private final PubsubSupervisorTuningConfig tuningConfig;
+  private final PubsubIndexTaskTuningConfig taskTuningConfig;
+  private volatile Map<Integer, Long> latestSequenceFromStream;
+  private boolean listenerRegistered = false;
+  private long lastRunTime;
+  private int initRetryCounter = 0;
+  private volatile DateTime firstRunTime;
+  private volatile DateTime earlyStopTime = null;
+  private volatile PubsubRecordSupplier recordSupplier;
+  private volatile boolean started = false;
+  private volatile boolean stopped = false;
+  private volatile boolean lifecycleStarted = false;
 
-  private PubsubSupervisor(
-      final String supervisorId,
+  public PubsubSupervisor(
       final TaskStorage taskStorage,
       final TaskMaster taskMaster,
       final IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator,
       final PubsubIndexTaskClientFactory taskClientFactory,
       final ObjectMapper mapper,
       final PubsubSupervisorSpec spec,
-      final RowIngestionMetersFactory rowIngestionMetersFactory,
-      final boolean useExclusiveStartingSequence
+      final RowIngestionMetersFactory rowIngestionMetersFactory
   )
   {
     this.taskStorage = taskStorage;
@@ -78,16 +131,15 @@ public class PubsubSupervisor implements Supervisor
     this.sortingMapper = mapper.copy().configure(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY, true);
     this.spec = spec;
     this.rowIngestionMetersFactory = rowIngestionMetersFactory;
-    this.useExclusiveStartingSequence = useExclusiveStartingSequence;
     this.dataSource = spec.getDataSchema().getDataSource();
     this.ioConfig = spec.getIoConfig();
     this.tuningConfig = spec.getTuningConfig();
     this.taskTuningConfig = this.tuningConfig.convertToTaskTuningConfig();
-    this.supervisorId = supervisorId;
+    this.supervisorId = StringUtils.format("KafkaSupervisor-%s", spec.getDataSchema().getDataSource());
     this.exec = Execs.singleThreaded(supervisorId);
     this.scheduledExec = Execs.scheduledSingleThreaded(supervisorId + "-Scheduler-%d");
     this.reportingExec = Execs.scheduledSingleThreaded(supervisorId + "-Reporting-%d");
-    this.stateManager = new SeekableStreamSupervisorStateManager(
+    this.stateManager = new PubsubSupervisorStateManager(
         spec.getSupervisorStateManagerConfig(),
         spec.isSuspended()
     );
@@ -152,37 +204,14 @@ public class PubsubSupervisor implements Supervisor
         this.tuningConfig.getHttpTimeout(),
         this.tuningConfig.getChatRetries()
     );
-  }
 
-  public PubsubSupervisor(
-      final TaskStorage taskStorage,
-      final TaskMaster taskMaster,
-      final IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator,
-      final PubsubIndexTaskClientFactory taskClientFactory,
-      final ObjectMapper mapper,
-      final PubsubSupervisorSpec spec,
-      final RowIngestionMetersFactory rowIngestionMetersFactory
-  )
-  {
-    super(
-        StringUtils.format("PubsubSupervisor-%s", spec.getDataSchema().getDataSource()),
-        taskStorage,
-        taskMaster,
-        indexerMetadataStorageCoordinator,
-        taskClientFactory,
-        mapper,
-        spec,
-        rowIngestionMetersFactory,
-        false
-    );
-
-    this.spec = spec;
     this.emitter = spec.getEmitter();
     this.monitorSchedulerConfig = spec.getMonitorSchedulerConfig();
   }
 
   @Override
-  void start() {
+  public void start()
+  {
     log.error("NOT IMPLEMENTED YET!");
     // TODO
   }
@@ -194,35 +223,39 @@ public class PubsubSupervisor implements Supervisor
    *                       running tasks as they are.
    */
   @Override
-  void stop(boolean stopGracefully) {
+  public void stop(boolean stopGracefully)
+  {
     // TODO
   }
 
   @Override
-  SupervisorReport getStatus() {
+  public SupervisorReport getStatus()
+  {
     return null; // TODO
   }
 
   @Override
-  SupervisorStateManager.State getState() {
-    return stateManager.getState();
+  public SupervisorStateManager.State getState()
+  {
+    return stateManager.getSupervisorState();
   }
 
   @Override
-  Map<String, Map<String, Object>> getStats()
+  public Map<String, Map<String, Object>> getStats()
   {
     return ImmutableMap.of(); // TODO
   }
 
   @Override
   @Nullable
-  Boolean isHealthy()
+  public Boolean isHealthy()
   {
     return stateManager.isHealthy();
   }
 
   @Override
-  void reset(DataSourceMetadata dataSourceMetadata) {
+  public void reset(DataSourceMetadata dataSourceMetadata)
+  {
     // TODO
   }
 
@@ -236,8 +269,17 @@ public class PubsubSupervisor implements Supervisor
    * @param checkpointMetadata metadata for the sequence to currently checkpoint
    */
   @Override
-  void checkpoint(int taskGroupId, DataSourceMetadata checkpointMetadata) {
+  public void checkpoint(int taskGroupId, DataSourceMetadata checkpointMetadata)
+  {
     // TODO
+  }
+
+  /**
+   * Notice is used to queue tasks that are internal to the supervisor
+   */
+  private interface Notice
+  {
+    void handle() throws ExecutionException, InterruptedException, TimeoutException;
   }
 
 }

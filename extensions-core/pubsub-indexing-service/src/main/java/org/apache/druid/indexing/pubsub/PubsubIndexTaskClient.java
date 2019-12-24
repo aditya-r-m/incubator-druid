@@ -22,11 +22,18 @@ package org.apache.druid.indexing.pubsub;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.druid.indexing.common.IndexTaskClient;
 import org.apache.druid.indexing.common.TaskInfoProvider;
+import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.http.client.HttpClient;
+import org.apache.druid.java.util.http.client.response.StringFullResponseHolder;
+import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.joda.time.Duration;
+
+import java.io.IOException;
 
 public class PubsubIndexTaskClient extends IndexTaskClient
 {
+  private static final Logger log = new Logger(PubsubIndexTaskClient.class);
+
   PubsubIndexTaskClient(
       HttpClient httpClient,
       ObjectMapper jsonMapper,
@@ -81,7 +88,13 @@ public class PubsubIndexTaskClient extends IndexTaskClient
     log.debug("Resume task[%s]", id);
 
     try {
-      final StringFullResponseHolder response = submitRequestWithEmptyContent(id, HttpMethod.POST, "resume", null, true);
+      final StringFullResponseHolder response = submitRequestWithEmptyContent(
+          id,
+          HttpMethod.POST,
+          "resume",
+          null,
+          true
+      );
       return isSuccess(response);
     }
     catch (NoTaskLocationException | IOException e) {

@@ -28,15 +28,19 @@ import com.google.pubsub.v1.ProjectSubscriptionName;
 import com.google.pubsub.v1.PullRequest;
 import com.google.pubsub.v1.PullResponse;
 import com.google.pubsub.v1.ReceivedMessage;
+import org.apache.druid.java.util.common.logger.Logger;
 
 import javax.annotation.Nonnull;
 import java.io.Closeable;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 public class PubsubRecordSupplier implements Closeable
 {
+  private static final Logger log = new Logger(PubsubRecordSupplier.class);
+
   private boolean closed;
 
   public PubsubRecordSupplier(
@@ -47,47 +51,52 @@ public class PubsubRecordSupplier implements Closeable
   }
 
   @Nonnull
-  @Override
   public List<ReceivedMessage> poll(long timeout)
   {
-    SubscriberStubSettings subscriberStubSettings =
-        SubscriberStubSettings.newBuilder()
-                              .setTransportChannelProvider(
-                                  SubscriberStubSettings.defaultGrpcTransportProviderBuilder()
-                                                        .setMaxInboundMessageSize(20 << 20) // 20MiB
-                                                        .build())
+    try {
+      SubscriberStubSettings subscriberStubSettings =
+          SubscriberStubSettings.newBuilder()
+                                .setTransportChannelProvider(
+                                    SubscriberStubSettings.defaultGrpcTransportProviderBuilder()
+                                                          .setMaxInboundMessageSize(20 << 20) // 20MiB
+                                                          .build())
+                                .build();
+
+      try (SubscriberStub subscriber = GrpcSubscriberStub.create(subscriberStubSettings)) {
+        String projectId = "fifth-shine-238813";
+        String subscriptionId = "druid";
+        int numOfMessages = 10;   // max number of messages to be pulled
+        String subscriptionName = ProjectSubscriptionName.format(projectId, subscriptionId);
+        PullRequest pullRequest =
+            PullRequest.newBuilder()
+                       .setMaxMessages(numOfMessages)
+                       .setReturnImmediately(false) // return immediately if messages are not available
+                       .setSubscription(subscriptionName)
+                       .build();
+
+        // use pullCallable().futureCall to asynchronously perform this operation
+        PullResponse pullResponse = subscriber.pullCallable().call(pullRequest);
+        List<String> ackIds = new ArrayList<>();
+        for (ReceivedMessage message : pullResponse.getReceivedMessagesList()) {
+          // handle received message
+          // ...
+          ackIds.add(message.getAckId());
+        }
+        // acknowledge received messages
+        AcknowledgeRequest acknowledgeRequest =
+            AcknowledgeRequest.newBuilder()
+                              .setSubscription(subscriptionName)
+                              .addAllAckIds(ackIds)
                               .build();
-
-    try (SubscriberStub subscriber = GrpcSubscriberStub.create(subscriberStubSettings)) {
-       String projectId = "fifth-shine-238813";
-       String subscriptionId = "druid";
-       int numOfMessages = 10;   // max number of messages to be pulled
-      String subscriptionName = ProjectSubscriptionName.format(projectId, subscriptionId);
-      PullRequest pullRequest =
-          PullRequest.newBuilder()
-                     .setMaxMessages(numOfMessages)
-                     .setReturnImmediately(false) // return immediately if messages are not available
-                     .setSubscription(subscriptionName)
-                     .build();
-
-      // use pullCallable().futureCall to asynchronously perform this operation
-      PullResponse pullResponse = subscriber.pullCallable().call(pullRequest);
-      List<String> ackIds = new ArrayList<>();
-      for (ReceivedMessage message : pullResponse.getReceivedMessagesList()) {
-        // handle received message
-        // ...
-        ackIds.add(message.getAckId());
+        // use acknowledgeCallable().futureCall to asynchronously perform this operation
+        subscriber.acknowledgeCallable().call(acknowledgeRequest);
+        return pullResponse.getReceivedMessagesList();
       }
-      // acknowledge received messages
-      AcknowledgeRequest acknowledgeRequest =
-          AcknowledgeRequest.newBuilder()
-                            .setSubscription(subscriptionName)
-                            .addAllAckIds(ackIds)
-                            .build();
-      // use acknowledgeCallable().futureCall to asynchronously perform this operation
-      subscriber.acknowledgeCallable().call(acknowledgeRequest);
-      return pullResponse.getReceivedMessagesList();
     }
+    catch (IOException e) {
+      log.error("failed to get the data my dude " + e);
+    }
+    return null;
   }
 
   @Override

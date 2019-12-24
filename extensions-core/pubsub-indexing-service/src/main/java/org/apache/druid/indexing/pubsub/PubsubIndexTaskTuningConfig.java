@@ -21,14 +21,13 @@ package org.apache.druid.indexing.pubsub;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import org.apache.druid.segment.IndexSpec;
-import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
-import org.joda.time.Period;
-
 import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
+import org.apache.druid.segment.IndexSpec;
 import org.apache.druid.segment.indexing.RealtimeTuningConfig;
 import org.apache.druid.segment.indexing.TuningConfig;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorConfig;
+import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
+import org.joda.time.Period;
 
 import javax.annotation.Nullable;
 import java.io.File;
@@ -130,6 +129,52 @@ public class PubsubIndexTaskTuningConfig implements TuningConfig, AppenderatorCo
     this.logParseExceptions = logParseExceptions == null
                               ? TuningConfig.DEFAULT_LOG_PARSE_EXCEPTIONS
                               : logParseExceptions;
+  }
+
+  @JsonCreator
+  public PubsubIndexTaskTuningConfig(
+      @JsonProperty("maxRowsInMemory") @Nullable Integer maxRowsInMemory,
+      @JsonProperty("maxBytesInMemory") @Nullable Long maxBytesInMemory,
+      @JsonProperty("maxRowsPerSegment") @Nullable Integer maxRowsPerSegment,
+      @JsonProperty("maxTotalRows") @Nullable Long maxTotalRows,
+      @JsonProperty("intermediatePersistPeriod") @Nullable Period intermediatePersistPeriod,
+      @JsonProperty("basePersistDirectory") @Nullable File basePersistDirectory,
+      @JsonProperty("maxPendingPersists") @Nullable Integer maxPendingPersists,
+      @JsonProperty("indexSpec") @Nullable IndexSpec indexSpec,
+      @JsonProperty("indexSpecForIntermediatePersists") @Nullable IndexSpec indexSpecForIntermediatePersists,
+      // This parameter is left for compatibility when reading existing configs, to be removed in Druid 0.12.
+      @JsonProperty("buildV9Directly") @Nullable Boolean buildV9Directly,
+      @Deprecated @JsonProperty("reportParseExceptions") @Nullable Boolean reportParseExceptions,
+      @JsonProperty("handoffConditionTimeout") @Nullable Long handoffConditionTimeout,
+      @JsonProperty("resetOffsetAutomatically") @Nullable Boolean resetOffsetAutomatically,
+      @JsonProperty("segmentWriteOutMediumFactory") @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory,
+      @JsonProperty("intermediateHandoffPeriod") @Nullable Period intermediateHandoffPeriod,
+      @JsonProperty("logParseExceptions") @Nullable Boolean logParseExceptions,
+      @JsonProperty("maxParseExceptions") @Nullable Integer maxParseExceptions,
+      @JsonProperty("maxSavedParseExceptions") @Nullable Integer maxSavedParseExceptions
+  )
+  {
+    this(
+        maxRowsInMemory,
+        maxBytesInMemory,
+        maxRowsPerSegment,
+        maxTotalRows,
+        intermediatePersistPeriod,
+        basePersistDirectory,
+        maxPendingPersists,
+        indexSpec,
+        indexSpecForIntermediatePersists,
+        true,
+        reportParseExceptions,
+        handoffConditionTimeout,
+        resetOffsetAutomatically,
+        false,
+        segmentWriteOutMediumFactory,
+        intermediateHandoffPeriod,
+        logParseExceptions,
+        maxParseExceptions,
+        maxSavedParseExceptions
+    );
   }
 
   @Override
@@ -317,52 +362,6 @@ public class PubsubIndexTaskTuningConfig implements TuningConfig, AppenderatorCo
         segmentWriteOutMediumFactory,
         intermediateHandoffPeriod,
         skipSequenceNumberAvailabilityCheck,
-        logParseExceptions,
-        maxParseExceptions,
-        maxSavedParseExceptions
-    );
-  }
-
-  @JsonCreator
-  public PubsubIndexTaskTuningConfig(
-      @JsonProperty("maxRowsInMemory") @Nullable Integer maxRowsInMemory,
-      @JsonProperty("maxBytesInMemory") @Nullable Long maxBytesInMemory,
-      @JsonProperty("maxRowsPerSegment") @Nullable Integer maxRowsPerSegment,
-      @JsonProperty("maxTotalRows") @Nullable Long maxTotalRows,
-      @JsonProperty("intermediatePersistPeriod") @Nullable Period intermediatePersistPeriod,
-      @JsonProperty("basePersistDirectory") @Nullable File basePersistDirectory,
-      @JsonProperty("maxPendingPersists") @Nullable Integer maxPendingPersists,
-      @JsonProperty("indexSpec") @Nullable IndexSpec indexSpec,
-      @JsonProperty("indexSpecForIntermediatePersists") @Nullable IndexSpec indexSpecForIntermediatePersists,
-      // This parameter is left for compatibility when reading existing configs, to be removed in Druid 0.12.
-      @JsonProperty("buildV9Directly") @Nullable Boolean buildV9Directly,
-      @Deprecated @JsonProperty("reportParseExceptions") @Nullable Boolean reportParseExceptions,
-      @JsonProperty("handoffConditionTimeout") @Nullable Long handoffConditionTimeout,
-      @JsonProperty("resetOffsetAutomatically") @Nullable Boolean resetOffsetAutomatically,
-      @JsonProperty("segmentWriteOutMediumFactory") @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory,
-      @JsonProperty("intermediateHandoffPeriod") @Nullable Period intermediateHandoffPeriod,
-      @JsonProperty("logParseExceptions") @Nullable Boolean logParseExceptions,
-      @JsonProperty("maxParseExceptions") @Nullable Integer maxParseExceptions,
-      @JsonProperty("maxSavedParseExceptions") @Nullable Integer maxSavedParseExceptions
-  )
-  {
-    this(
-        maxRowsInMemory,
-        maxBytesInMemory,
-        maxRowsPerSegment,
-        maxTotalRows,
-        intermediatePersistPeriod,
-        basePersistDirectory,
-        maxPendingPersists,
-        indexSpec,
-        indexSpecForIntermediatePersists,
-        true,
-        reportParseExceptions,
-        handoffConditionTimeout,
-        resetOffsetAutomatically,
-        false,
-        segmentWriteOutMediumFactory,
-        intermediateHandoffPeriod,
         logParseExceptions,
         maxParseExceptions,
         maxSavedParseExceptions

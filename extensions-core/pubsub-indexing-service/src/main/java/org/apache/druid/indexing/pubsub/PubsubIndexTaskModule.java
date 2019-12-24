@@ -26,6 +26,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
 import com.google.inject.TypeLiteral;
 import org.apache.druid.guice.LazySingleton;
+import org.apache.druid.indexing.common.task.IndexTaskClientFactory;
 import org.apache.druid.indexing.pubsub.supervisor.PubsubSupervisorSpec;
 import org.apache.druid.indexing.pubsub.supervisor.PubsubSupervisorTuningConfig;
 import org.apache.druid.initialization.DruidModule;
@@ -41,7 +42,6 @@ public class PubsubIndexTaskModule implements DruidModule
         new SimpleModule(getClass().getSimpleName())
             .registerSubtypes(
                 new NamedType(PubsubIndexTask.class, "index_pubsub"),
-                new NamedType(PubsubDataSourceMetadata.class, "pubsub"),
                 new NamedType(PubsubIndexTaskIOConfig.class, "pubsub"),
                 // "PubsubTuningConfig" is not the ideal name, but is needed for backwards compatibility.
                 // (Older versions of Druid didn't specify a type name and got this one by default.)

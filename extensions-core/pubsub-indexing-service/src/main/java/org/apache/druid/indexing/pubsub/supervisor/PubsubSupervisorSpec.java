@@ -23,6 +23,8 @@ import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
@@ -43,62 +45,19 @@ import java.util.Map;
 public class PubsubSupervisorSpec implements SupervisorSpec
 {
   private static final String TASK_TYPE = "pubsub";
-
-  private static PubsubSupervisorIngestionSpec checkIngestionSchema(
-      PubsubSupervisorIngestionSpec ingestionSchema
-  )
-  {
-    Preconditions.checkNotNull(ingestionSchema, "ingestionSchema");
-    Preconditions.checkNotNull(ingestionSchema.getDataSchema(), "dataSchema");
-    Preconditions.checkNotNull(ingestionSchema.getIOConfig(), "ioConfig");
-    return ingestionSchema;
-  }
-
   protected final TaskStorage taskStorage;
   protected final TaskMaster taskMaster;
   protected final IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator;
   protected final PubsubIndexTaskClientFactory indexTaskClientFactory;
   protected final ObjectMapper mapper;
   protected final RowIngestionMetersFactory rowIngestionMetersFactory;
+  protected final ServiceEmitter emitter;
+  protected final DruidMonitorSchedulerConfig monitorSchedulerConfig;
+  protected final SupervisorStateManagerConfig supervisorStateManagerConfig;
   private final PubsubSupervisorIngestionSpec ingestionSchema;
   @Nullable
   private final Map<String, Object> context;
-  protected final ServiceEmitter emitter;
-  protected final DruidMonitorSchedulerConfig monitorSchedulerConfig;
   private final boolean suspended;
-  protected final SupervisorStateManagerConfig supervisorStateManagerConfig;
-
-  @JsonCreator
-  public PubsubSupervisorSpec(
-      @JsonProperty("spec") final PubsubSupervisorIngestionSpec ingestionSchema,
-      @JsonProperty("context") @Nullable Map<String, Object> context,
-      @JsonProperty("suspended") Boolean suspended,
-      @JacksonInject TaskStorage taskStorage,
-      @JacksonInject TaskMaster taskMaster,
-      @JacksonInject IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator,
-      @JacksonInject PubsubIndexTaskClientFactory indexTaskClientFactory,
-      @JacksonInject @Json ObjectMapper mapper,
-      @JacksonInject ServiceEmitter emitter,
-      @JacksonInject DruidMonitorSchedulerConfig monitorSchedulerConfig,
-      @JacksonInject RowIngestionMetersFactory rowIngestionMetersFactory,
-      @JacksonInject SupervisorStateManagerConfig supervisorStateManagerConfig
-  )
-  {
-    this.ingestionSchema = checkIngestionSchema(ingestionSchema);
-    this.context = context;
-
-    this.taskStorage = taskStorage;
-    this.taskMaster = taskMaster;
-    this.indexerMetadataStorageCoordinator = indexerMetadataStorageCoordinator;
-    this.indexTaskClientFactory = indexTaskClientFactory;
-    this.mapper = mapper;
-    this.emitter = emitter;
-    this.monitorSchedulerConfig = monitorSchedulerConfig;
-    this.rowIngestionMetersFactory = rowIngestionMetersFactory;
-    this.suspended = suspended != null ? suspended : false;
-    this.supervisorStateManagerConfig = supervisorStateManagerConfig;
-  }
-
 
   @JsonCreator
   public PubsubSupervisorSpec(
@@ -119,28 +78,37 @@ public class PubsubSupervisorSpec implements SupervisorSpec
       @JacksonInject SupervisorStateManagerConfig supervisorStateManagerConfig
   )
   {
-    this(
-        ingestionSchema != null
-        ? ingestionSchema
-        : new PubsubSupervisorIngestionSpec(
-            dataSchema,
-            ioConfig,
-            tuningConfig != null
-            ? tuningConfig
-            : PubsubSupervisorTuningConfig.defaultConfig()
-        ),
-        context,
-        suspended,
-        taskStorage,
-        taskMaster,
-        indexerMetadataStorageCoordinator,
-        pubsubIndexTaskClientFactory,
-        mapper,
-        emitter,
-        monitorSchedulerConfig,
-        rowIngestionMetersFactory,
-        supervisorStateManagerConfig
-    );
+    this.ingestionSchema = ingestionSchema != null
+                           ? ingestionSchema
+                           : new PubsubSupervisorIngestionSpec(
+                               dataSchema,
+                               ioConfig,
+                               tuningConfig != null
+                               ? tuningConfig
+                               : PubsubSupervisorTuningConfig.defaultConfig()
+                           );
+    this.context = context;
+
+    this.taskStorage = taskStorage;
+    this.taskMaster = taskMaster;
+    this.indexerMetadataStorageCoordinator = indexerMetadataStorageCoordinator;
+    this.indexTaskClientFactory = pubsubIndexTaskClientFactory;
+    this.mapper = mapper;
+    this.emitter = emitter;
+    this.monitorSchedulerConfig = monitorSchedulerConfig;
+    this.rowIngestionMetersFactory = rowIngestionMetersFactory;
+    this.suspended = suspended != null ? suspended : false;
+    this.supervisorStateManagerConfig = supervisorStateManagerConfig;
+  }
+
+  private static PubsubSupervisorIngestionSpec checkIngestionSchema(
+      PubsubSupervisorIngestionSpec ingestionSchema
+  )
+  {
+    Preconditions.checkNotNull(ingestionSchema, "ingestionSchema");
+    Preconditions.checkNotNull(ingestionSchema.getDataSchema(), "dataSchema");
+    Preconditions.checkNotNull(ingestionSchema.getIOConfig(), "ioConfig");
+    return ingestionSchema;
   }
 
   @Override
@@ -154,10 +122,20 @@ public class PubsubSupervisorSpec implements SupervisorSpec
     return monitorSchedulerConfig;
   }
 
+  public DataSchema getDataSchema()
+  {
+    return ingestionSchema.getDataSchema();
+  }
+
+  public Map<String, Object> getContext()
+  {
+    return context;
+  }
+
   @Override
   public List<String> getDataSources()
   {
-    return ImmutableList.of(getDataSchema().getDataSource());
+    return ImmutableList.of(ingestionSchema.getDataSchema().getDataSource());
   }
 
   @Override
@@ -185,43 +163,56 @@ public class PubsubSupervisorSpec implements SupervisorSpec
   }
 
   @Override
+  public boolean isSuspended()
+  {
+    return suspended;
+  }
+
+  public ServiceEmitter getEmitter()
+  {
+    return emitter;
+  }
+
+  public SupervisorStateManagerConfig getSupervisorStateManagerConfig()
+  {
+    return supervisorStateManagerConfig;
+  }
+
+
+  @Override
   public Supervisor createSupervisor()
   {
     return new PubsubSupervisor(
         taskStorage,
         taskMaster,
         indexerMetadataStorageCoordinator,
-        (PubsubIndexTaskClientFactory) indexTaskClientFactory,
+        indexTaskClientFactory,
         mapper,
         this,
         rowIngestionMetersFactory
     );
   }
 
-  @Override
   @Deprecated
   @JsonProperty
   public PubsubSupervisorTuningConfig getTuningConfig()
   {
-    return (PubsubSupervisorTuningConfig) super.getTuningConfig();
+    return getTuningConfig();
   }
 
-  @Override
   @Deprecated
   @JsonProperty
   public PubsubSupervisorIOConfig getIoConfig()
   {
-    return (PubsubSupervisorIOConfig) super.getIoConfig();
+    return getIoConfig();
   }
 
-  @Override
   @JsonProperty
   public PubsubSupervisorIngestionSpec getSpec()
   {
-    return (PubsubSupervisorIngestionSpec) super.getSpec();
+    return getSpec();
   }
 
-  @Override
   protected PubsubSupervisorSpec toggleSuspend(boolean suspend)
   {
     return new PubsubSupervisorSpec(
@@ -234,19 +225,13 @@ public class PubsubSupervisorSpec implements SupervisorSpec
         taskStorage,
         taskMaster,
         indexerMetadataStorageCoordinator,
-        (PubsubIndexTaskClientFactory) indexTaskClientFactory,
+        indexTaskClientFactory,
         mapper,
         emitter,
         monitorSchedulerConfig,
         rowIngestionMetersFactory,
         supervisorStateManagerConfig
     );
-  }
-
-  @Override
-  boolean isSuspended()
-  {
-    return false;
   }
 
   @Override

@@ -29,16 +29,19 @@ public class TaskReportData
   private final String id;
   private final DateTime startTime;
   private final Long remainingSeconds;
+  private final TaskType type;
 
   public TaskReportData(
       String id,
       @Nullable DateTime startTime,
-      Long remainingSeconds
+      Long remainingSeconds,
+      TaskType type
   )
   {
     this.id = id;
     this.startTime = startTime;
     this.remainingSeconds = remainingSeconds;
+    this.type = type;
   }
 
   @JsonProperty
