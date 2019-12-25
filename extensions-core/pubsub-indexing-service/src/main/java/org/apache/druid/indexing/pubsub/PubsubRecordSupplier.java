@@ -35,7 +35,6 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 public class PubsubRecordSupplier implements Closeable
 {
@@ -44,7 +43,6 @@ public class PubsubRecordSupplier implements Closeable
   private boolean closed;
 
   public PubsubRecordSupplier(
-      Map<String, Object> consumerProperties,
       ObjectMapper sortingMapper
   )
   {

@@ -29,6 +29,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.pubsub.v1.ReceivedMessage;
 import org.apache.druid.data.input.Committer;
 import org.apache.druid.data.input.InputEntityReader;
@@ -52,8 +53,6 @@ import org.apache.druid.indexing.common.actions.TimeChunkLockAcquireAction;
 import org.apache.druid.indexing.common.stats.RowIngestionMeters;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.common.task.RealtimeIndexTask;
-import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskIOConfig;
-import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskTuningConfig;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
@@ -72,11 +71,9 @@ import org.apache.druid.segment.realtime.appenderator.SegmentsAndMetadata;
 import org.apache.druid.segment.realtime.appenderator.StreamAppenderatorDriver;
 import org.apache.druid.segment.realtime.firehose.ChatHandler;
 import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
-import org.apache.druid.server.security.Action;
 import org.apache.druid.server.security.AuthorizerMapper;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.utils.CircularBuffer;
-import com.google.common.util.concurrent.ListenableFuture;
 import org.joda.time.DateTime;
 
 import javax.annotation.Nonnull;
@@ -96,12 +93,10 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
@@ -115,6 +110,8 @@ public class PubsubIndexTaskRunner implements ChatHandler
 {
   private static final EmittingLogger log = new EmittingLogger(PubsubIndexTaskRunner.class);
   protected final AtomicBoolean stopRequested = new AtomicBoolean(false);
+  protected final Lock pollRetryLock = new ReentrantLock();
+  protected final Condition isAwaitingRetry = pollRetryLock.newCondition();
   private final PubsubIndexTaskIOConfig ioConfig;
   private final PubsubIndexTaskTuningConfig tuningConfig;
   private final PubsubIndexTask task;
@@ -147,6 +144,8 @@ public class PubsubIndexTaskRunner implements ChatHandler
   private final Condition hasPaused = pauseLock.newCondition();
   private final Condition shouldResume = pauseLock.newCondition();
   private final AtomicBoolean publishOnStop = new AtomicBoolean(false);
+  private final List<ListenableFuture<SegmentsAndMetadata>> publishWaitList = new ArrayList<>();
+  private final List<ListenableFuture<SegmentsAndMetadata>> handOffWaitList = new ArrayList<>();
   protected volatile boolean pauseRequested = false;
   private volatile DateTime startTime;
   private volatile Status status = Status.NOT_STARTED; // this is only ever set by the task runner thread (runThread)
@@ -155,10 +154,6 @@ public class PubsubIndexTaskRunner implements ChatHandler
   private volatile Appenderator appenderator;
   private volatile StreamAppenderatorDriver driver;
   private volatile IngestionState ingestionState;
-  private final List<com.google.common.util.concurrent.ListenableFuture<SegmentsAndMetadata>> publishWaitList = new ArrayList<>();
-  private final List<com.google.common.util.concurrent.ListenableFuture<SegmentsAndMetadata>> handOffWaitList = new ArrayList<>();
-  protected final Lock pollRetryLock = new ReentrantLock();
-  protected final Condition isAwaitingRetry = pollRetryLock.newCondition();
 
   PubsubIndexTaskRunner(
       PubsubIndexTask task,

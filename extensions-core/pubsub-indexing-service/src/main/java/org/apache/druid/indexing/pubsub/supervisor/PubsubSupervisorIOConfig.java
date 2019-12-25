@@ -31,7 +31,6 @@ import org.joda.time.Duration;
 import org.joda.time.Period;
 
 import javax.annotation.Nullable;
-import java.util.Map;
 
 public class PubsubSupervisorIOConfig
 {
@@ -39,7 +38,6 @@ public class PubsubSupervisorIOConfig
   public static final long DEFAULT_POLL_TIMEOUT_MILLIS = 100;
 
   private final long pollTimeout;
-  private final Map<String, Object> consumerProperties;
 
   private final String subscription;
   @Nullable
@@ -61,11 +59,9 @@ public class PubsubSupervisorIOConfig
       @JsonProperty("replicas") Integer replicas,
       @JsonProperty("taskCount") Integer taskCount,
       @JsonProperty("taskDuration") Period taskDuration,
-      @JsonProperty("consumerProperties") Map<String, Object> consumerProperties,
       @JsonProperty("pollTimeout") Long pollTimeout,
       @JsonProperty("startDelay") Period startDelay,
       @JsonProperty("period") Period period,
-      @JsonProperty("useEarliestOffset") Boolean useEarliestOffset,
       @JsonProperty("completionTimeout") Period completionTimeout,
       @JsonProperty("lateMessageRejectionPeriod") Period lateMessageRejectionPeriod,
       @JsonProperty("earlyMessageRejectionPeriod") Period earlyMessageRejectionPeriod,
@@ -98,7 +94,6 @@ public class PubsubSupervisorIOConfig
                     + "and lateMessageRejectionPeriod.");
     }
 
-    this.consumerProperties = Preconditions.checkNotNull(consumerProperties, "consumerProperties");
     this.pollTimeout = pollTimeout != null ? pollTimeout : DEFAULT_POLL_TIMEOUT_MILLIS;
   }
 
@@ -186,12 +181,6 @@ public class PubsubSupervisorIOConfig
   }
 
   @JsonProperty
-  public Map<String, Object> getConsumerProperties()
-  {
-    return consumerProperties;
-  }
-
-  @JsonProperty
   public long getPollTimeout()
   {
     return pollTimeout;
@@ -205,7 +194,6 @@ public class PubsubSupervisorIOConfig
            ", replicas=" + getReplicas() +
            ", taskCount=" + getTaskCount() +
            ", taskDuration=" + getTaskDuration() +
-           ", consumerProperties=" + consumerProperties +
            ", pollTimeout=" + pollTimeout +
            ", startDelay=" + getStartDelay() +
            ", period=" + getPeriod() +

@@ -207,6 +207,7 @@ public class PubsubSupervisor implements Supervisor
 
     this.emitter = spec.getEmitter();
     this.monitorSchedulerConfig = spec.getMonitorSchedulerConfig();
+    log.error("NOT IMPLEMENTED YET!");
   }
 
   @Override

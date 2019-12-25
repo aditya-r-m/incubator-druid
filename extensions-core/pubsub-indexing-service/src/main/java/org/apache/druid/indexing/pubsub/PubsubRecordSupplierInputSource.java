@@ -41,17 +41,14 @@ public class PubsubRecordSupplierInputSource extends AbstractInputSource
 {
   private final String topic;
   private final PubsubRecordSupplier recordSupplier;
-  private final boolean useEarliestOffset;
 
   PubsubRecordSupplierInputSource(
       String topic,
-      PubsubRecordSupplier recordSupplier,
-      boolean useEarliestOffset
+      PubsubRecordSupplier recordSupplier
   )
   {
     this.topic = topic;
     this.recordSupplier = recordSupplier;
-    this.useEarliestOffset = useEarliestOffset;
   }
 
   @Override

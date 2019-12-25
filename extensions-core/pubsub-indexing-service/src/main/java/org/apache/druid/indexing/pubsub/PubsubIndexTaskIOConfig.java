@@ -30,13 +30,11 @@ import org.apache.druid.segment.indexing.IOConfig;
 import org.joda.time.DateTime;
 
 import javax.annotation.Nullable;
-import java.util.Map;
 
 public class PubsubIndexTaskIOConfig implements IOConfig
 {
   @Nullable
   private final Integer taskGroupId;
-  private final Map<String, Object> consumerProperties;
   private final long pollTimeout;
   private final DateTime minimumMessageTime;
   private final DateTime maximumMessageTime;
@@ -45,7 +43,6 @@ public class PubsubIndexTaskIOConfig implements IOConfig
   @JsonCreator
   public PubsubIndexTaskIOConfig(
       @JsonProperty("taskGroupId") @Nullable Integer taskGroupId, // can be null for backward compabitility
-      @JsonProperty("consumerProperties") Map<String, Object> consumerProperties,
       @JsonProperty("pollTimeout") Long pollTimeout,
       @JsonProperty("minimumMessageTime") DateTime minimumMessageTime,
       @JsonProperty("maximumMessageTime") DateTime maximumMessageTime,
@@ -53,7 +50,6 @@ public class PubsubIndexTaskIOConfig implements IOConfig
   )
   {
     this.taskGroupId = taskGroupId;
-    this.consumerProperties = Preconditions.checkNotNull(consumerProperties, "consumerProperties");
     this.pollTimeout = pollTimeout != null ? pollTimeout : PubsubSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS;
     this.minimumMessageTime = minimumMessageTime;
     this.maximumMessageTime = maximumMessageTime;
@@ -65,12 +61,6 @@ public class PubsubIndexTaskIOConfig implements IOConfig
   public Integer getTaskGroupId()
   {
     return taskGroupId;
-  }
-
-  @JsonProperty
-  public Map<String, Object> getConsumerProperties()
-  {
-    return consumerProperties;
   }
 
   @JsonProperty
@@ -109,7 +99,6 @@ public class PubsubIndexTaskIOConfig implements IOConfig
   {
     return "PubsubIndexTaskIOConfig{" +
            "taskGroupId=" + getTaskGroupId() +
-           ", consumerProperties=" + getConsumerProperties() +
            ", pollTimeout=" + getPollTimeout() +
            ", minimumMessageTime=" + getMinimumMessageTime() +
            ", maximumMessageTime=" + getMaximumMessageTime() +

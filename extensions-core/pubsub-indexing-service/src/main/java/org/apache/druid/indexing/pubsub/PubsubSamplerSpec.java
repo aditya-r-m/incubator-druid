@@ -53,7 +53,6 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -102,8 +101,7 @@ public class PubsubSamplerSpec implements SamplerSpec
     } else {
       inputSource = new PubsubRecordSupplierInputSource(
           ioConfig.getSubscription(),
-          createRecordSupplier(),
-          ioConfig.isUseEarliestSequenceNumber()
+          createRecordSupplier()
       );
       inputFormat = Preconditions.checkNotNull(
           ioConfig.getInputFormat(null),
@@ -120,13 +118,7 @@ public class PubsubSamplerSpec implements SamplerSpec
     try {
       Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
 
-      final Map<String, Object> props = new HashMap<>(ioConfig.getConsumerProperties());
-
-      props.put("enable.auto.commit", "false");
-      props.put("auto.offset.reset", "none");
-      props.put("request.timeout.ms", Integer.toString(samplerConfig.getTimeoutMs()));
-
-      return new PubsubRecordSupplier(props, objectMapper);
+      return new PubsubRecordSupplier(objectMapper);
     }
     finally {
       Thread.currentThread().setContextClassLoader(currCtxCl);
@@ -186,8 +178,7 @@ public class PubsubSamplerSpec implements SamplerSpec
 
       PubsubRecordSupplierInputSource inputSource = new PubsubRecordSupplierInputSource(
           ioConfig.getSubscription(),
-          createRecordSupplier(),
-          ioConfig.isUseEarliestSequenceNumber()
+          createRecordSupplier()
       );
       this.entityIterator = inputSource.createEntityIterator();
     }

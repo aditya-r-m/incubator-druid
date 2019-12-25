@@ -56,7 +56,6 @@ import org.apache.druid.server.security.AuthorizerMapper;
 import org.apache.druid.timeline.partition.NumberedShardSpecFactory;
 import org.apache.druid.utils.CircularBuffer;
 
-import java.util.HashMap;
 import java.util.Map;
 
 public class PubsubIndexTask extends AbstractTask implements ChatHandler
@@ -162,11 +161,7 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
     try {
       Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
 
-      final Map<String, Object> props = new HashMap<>(ioConfig.getConsumerProperties());
-
-      props.put("auto.offset.reset", "none");
-
-      return new PubsubRecordSupplier(props, configMapper);
+      return new PubsubRecordSupplier(configMapper);
     }
     finally {
       Thread.currentThread().setContextClassLoader(currCtxCl);
@@ -211,7 +206,7 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
   @JsonProperty
   public PubsubIndexTaskTuningConfig getTuningConfig()
   {
-    return getTuningConfig();
+    return tuningConfig;
   }
 
   @JsonProperty("ioConfig")
@@ -244,7 +239,8 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
     return null;
   }
 
-  public DataSchema getDataSchema() {
+  public DataSchema getDataSchema()
+  {
     return dataSchema;
   }
 

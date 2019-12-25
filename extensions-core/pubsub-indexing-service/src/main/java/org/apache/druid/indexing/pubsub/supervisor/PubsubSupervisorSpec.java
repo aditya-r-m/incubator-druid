@@ -55,6 +55,8 @@ public class PubsubSupervisorSpec implements SupervisorSpec
   protected final DruidMonitorSchedulerConfig monitorSchedulerConfig;
   protected final SupervisorStateManagerConfig supervisorStateManagerConfig;
   private final PubsubSupervisorIngestionSpec ingestionSchema;
+  private final PubsubSupervisorIOConfig ioConfig;
+  private final PubsubSupervisorTuningConfig tuningConfig;
   @Nullable
   private final Map<String, Object> context;
   private final boolean suspended;
@@ -99,6 +101,8 @@ public class PubsubSupervisorSpec implements SupervisorSpec
     this.rowIngestionMetersFactory = rowIngestionMetersFactory;
     this.suspended = suspended != null ? suspended : false;
     this.supervisorStateManagerConfig = supervisorStateManagerConfig;
+    this.ioConfig = ioConfig;
+    this.tuningConfig = tuningConfig;
   }
 
   private static PubsubSupervisorIngestionSpec checkIngestionSchema(
@@ -197,20 +201,20 @@ public class PubsubSupervisorSpec implements SupervisorSpec
   @JsonProperty
   public PubsubSupervisorTuningConfig getTuningConfig()
   {
-    return getTuningConfig();
+    return tuningConfig;
   }
 
   @Deprecated
   @JsonProperty
   public PubsubSupervisorIOConfig getIoConfig()
   {
-    return getIoConfig();
+    return ioConfig;
   }
 
   @JsonProperty
   public PubsubSupervisorIngestionSpec getSpec()
   {
-    return getSpec();
+    return ingestionSchema;
   }
 
   protected PubsubSupervisorSpec toggleSuspend(boolean suspend)
