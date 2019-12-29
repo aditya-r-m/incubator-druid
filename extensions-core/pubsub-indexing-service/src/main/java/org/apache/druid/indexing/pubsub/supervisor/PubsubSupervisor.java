@@ -33,19 +33,24 @@ import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.IndexTaskClient;
 import org.apache.druid.indexing.common.TaskInfoProvider;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
+import org.apache.druid.indexing.common.task.TaskResource;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import org.apache.druid.indexing.overlord.TaskMaster;
+import org.apache.druid.indexing.overlord.TaskQueue;
 import org.apache.druid.indexing.overlord.TaskRunner;
 import org.apache.druid.indexing.overlord.TaskRunnerWorkItem;
 import org.apache.druid.indexing.overlord.TaskStorage;
 import org.apache.druid.indexing.overlord.supervisor.Supervisor;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorReport;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManager;
+import org.apache.druid.indexing.pubsub.PubsubIndexTask;
 import org.apache.druid.indexing.pubsub.PubsubIndexTaskClient;
 import org.apache.druid.indexing.pubsub.PubsubIndexTaskClientFactory;
+import org.apache.druid.indexing.pubsub.PubsubIndexTaskIOConfig;
 import org.apache.druid.indexing.pubsub.PubsubIndexTaskTuningConfig;
 import org.apache.druid.indexing.pubsub.PubsubRecordSupplier;
+import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.emitter.EmittingLogger;
@@ -135,7 +140,7 @@ public class PubsubSupervisor implements Supervisor
     this.ioConfig = spec.getIoConfig();
     this.tuningConfig = spec.getTuningConfig();
     this.taskTuningConfig = this.tuningConfig.convertToTaskTuningConfig();
-    this.supervisorId = StringUtils.format("KafkaSupervisor-%s", spec.getDataSchema().getDataSource());
+    this.supervisorId = StringUtils.format("PubsubSupervisor-%s", spec.getDataSchema().getDataSource());
     this.exec = Execs.singleThreaded(supervisorId);
     this.scheduledExec = Execs.scheduledSingleThreaded(supervisorId + "-Scheduler-%d");
     this.reportingExec = Execs.scheduledSingleThreaded(supervisorId + "-Reporting-%d");
@@ -210,11 +215,47 @@ public class PubsubSupervisor implements Supervisor
     log.error("NOT IMPLEMENTED YET!");
   }
 
+  PubsubIndexTaskIOConfig createTaskIoConfig(PubsubSupervisorIOConfig ioConfig)
+  {
+    return new PubsubIndexTaskIOConfig(
+        null,
+        ioConfig.getPollTimeout(),
+        DateTimes.nowUtc(),
+        DateTimes.nowUtc(),
+        ioConfig.getInputFormat(
+            spec.getDataSchema().getParser() == null ? null : spec.getDataSchema().getParser().getParseSpec()
+        )
+    );
+  }
+
   @Override
   public void start()
   {
-    log.error("NOT IMPLEMENTED YET!");
-    // TODO
+    log.error("UNDER CONSTRUCTION!");
+    PubsubIndexTaskIOConfig newIoConfig = createTaskIoConfig(ioConfig);
+
+    Optional<TaskQueue> taskQueue = taskMaster.getTaskQueue();
+    if (taskQueue.isPresent()) {
+      try {
+        taskQueue.get().add(new PubsubIndexTask(
+            "pubsub-task",
+            new TaskResource("pubsub-task", 1),
+            this.spec.getDataSchema(),
+            this.tuningConfig,
+            newIoConfig,
+            null,
+            null,
+            null,
+            rowIngestionMetersFactory,
+            sortingMapper,
+            null
+        ));
+      }
+      catch (Exception e) {
+        log.error(e, "failed pub sup");
+      }
+      // TODO
+    }
   }
 
   /**

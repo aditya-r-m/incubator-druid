@@ -23,56 +23,33 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.pubsub.v1.ReceivedMessage;
-import org.apache.druid.data.input.Committer;
 import org.apache.druid.data.input.InputEntityReader;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.InputRowSchema;
 import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.data.input.impl.InputRowParser;
-import org.apache.druid.discovery.DiscoveryDruidNode;
-import org.apache.druid.discovery.LookupNodeService;
-import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.indexer.IngestionState;
 import org.apache.druid.indexer.TaskStatus;
-import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
 import org.apache.druid.indexing.common.LockGranularity;
-import org.apache.druid.indexing.common.TaskLockType;
-import org.apache.druid.indexing.common.TaskRealtimeMetricsMonitorBuilder;
 import org.apache.druid.indexing.common.TaskToolbox;
-import org.apache.druid.indexing.common.actions.SegmentLockAcquireAction;
-import org.apache.druid.indexing.common.actions.TimeChunkLockAcquireAction;
 import org.apache.druid.indexing.common.stats.RowIngestionMeters;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
-import org.apache.druid.indexing.common.task.RealtimeIndexTask;
-import org.apache.druid.java.util.common.DateTimes;
-import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.java.util.common.collect.Utils;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
 import org.apache.druid.java.util.common.parsers.ParseException;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.query.aggregation.AggregatorFactory;
-import org.apache.druid.segment.indexing.RealtimeIOConfig;
-import org.apache.druid.segment.realtime.FireDepartment;
-import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.segment.realtime.appenderator.Appenderator;
-import org.apache.druid.segment.realtime.appenderator.AppenderatorDriverAddResult;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
 import org.apache.druid.segment.realtime.appenderator.SegmentsAndMetadata;
 import org.apache.druid.segment.realtime.appenderator.StreamAppenderatorDriver;
 import org.apache.druid.segment.realtime.firehose.ChatHandler;
 import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
 import org.apache.druid.server.security.AuthorizerMapper;
-import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.utils.CircularBuffer;
 import org.joda.time.DateTime;
 
@@ -90,12 +67,10 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
@@ -201,6 +176,7 @@ public class PubsubIndexTaskRunner implements ChatHandler
   public TaskStatus run(TaskToolbox toolbox)
   {
     try {
+      log.info("running pubsub task");
       return runInternal(toolbox);
     }
     catch (Exception e) {
@@ -242,357 +218,27 @@ public class PubsubIndexTaskRunner implements ChatHandler
 
   private TaskStatus runInternal(TaskToolbox toolbox) throws Exception
   {
-    startTime = DateTimes.nowUtc();
-    status = Status.STARTING;
-
-    setToolbox(toolbox);
-
-    if (chatHandlerProvider.isPresent()) {
-      log.debug("Found chat handler of class[%s]", chatHandlerProvider.get().getClass().getName());
-      chatHandlerProvider.get().register(task.getId(), this, false);
-    } else {
-      log.warn("No chat handler detected.");
-    }
-
-    runThread = Thread.currentThread();
-
-    // Set up FireDepartmentMetrics
-    final FireDepartment fireDepartmentForMetrics = new FireDepartment(
-        task.getDataSchema(),
-        new RealtimeIOConfig(null, null),
-        null
-    );
-    FireDepartmentMetrics fireDepartmentMetrics = fireDepartmentForMetrics.getMetrics();
-    toolbox.getMonitorScheduler()
-           .addMonitor(TaskRealtimeMetricsMonitorBuilder.build(task, fireDepartmentForMetrics, rowIngestionMeters));
-
-    final String lookupTier = task.getContextValue(RealtimeIndexTask.CTX_KEY_LOOKUP_TIER);
-    final LookupNodeService lookupNodeService = lookupTier == null ?
-                                                toolbox.getLookupNodeService() :
-                                                new LookupNodeService(lookupTier);
-
-    final DiscoveryDruidNode discoveryDruidNode = new DiscoveryDruidNode(
-        toolbox.getDruidNode(),
-        NodeRole.PEON,
-        ImmutableMap.of(
-            toolbox.getDataNodeService().getName(), toolbox.getDataNodeService(),
-            lookupNodeService.getName(), lookupNodeService
-        )
-    );
-
-    Throwable caughtExceptionOuter = null;
-    try (final PubsubRecordSupplier recordSupplier = task.newTaskRecordSupplier()) {
-
-      if (appenderatorsManager.shouldTaskMakeNodeAnnouncements()) {
-        toolbox.getDataSegmentServerAnnouncer().announce();
-        toolbox.getDruidNodeAnnouncer().announce(discoveryDruidNode);
-      }
-      appenderator = task.newAppenderator(fireDepartmentMetrics, toolbox);
-      driver = task.newDriver(appenderator, toolbox, fireDepartmentMetrics);
-
-      // Start up, set up initial sequences.
-      final Object restoredMetadata = driver.startJob(
-          segmentId -> {
-            try {
-              if (lockGranularityToUse == LockGranularity.SEGMENT) {
-                return toolbox.getTaskActionClient().submit(
-                    new SegmentLockAcquireAction(
-                        TaskLockType.EXCLUSIVE,
-                        segmentId.getInterval(),
-                        segmentId.getVersion(),
-                        segmentId.getShardSpec().getPartitionNum(),
-                        1000L
-                    )
-                ).isOk();
-              } else {
-                return toolbox.getTaskActionClient().submit(
-                    new TimeChunkLockAcquireAction(
-                        TaskLockType.EXCLUSIVE,
-                        segmentId.getInterval(),
-                        1000L
-                    )
-                ) != null;
-              }
-            }
-            catch (IOException e) {
-              throw new RuntimeException(e);
-            }
-          }
-      );
-      if (restoredMetadata == null) {
-        // no persist has happened so far
-        // so either this is a brand new task or replacement of a failed task
-      } else {
-
-      }
-
-      // Set up committer.
-      final Supplier<Committer> committerSupplier = () -> {
-        return new Committer()
-        {
-          @Override
-          public Object getMetadata()
-          {
-            return null;
-          }
-
-          @Override
-          public void run()
-          {
-            // Do nothing.
-          }
-        };
-      };
-
-      ingestionState = IngestionState.BUILD_SEGMENTS;
-
-      // Main loop.
-      // Could eventually support leader/follower mode (for keeping replicas more in sync)
-      boolean stillReading = true;
-      status = Status.READING;
-      Throwable caughtExceptionInner = null;
-
+    log.info("pubsub attempt");
+    PubsubRecordSupplier recordSupplier = task.newTaskRecordSupplier();
+    List<ReceivedMessage> records = getRecords(recordSupplier, toolbox);
+    log.info("pubsub success");
+    log.info(records.size() + "");
+    log.info(records.toString());
+    while (true) {
       try {
-        while (stillReading) {
-          // if stop is requested or task's end sequence is set by call to setEndOffsets method with finish set to true
-          if (stopRequested.get()) {
-            status = Status.PUBLISHING;
-            break;
-          }
-
-          //if (backgroundThreadException != null) {
-          //  throw new RuntimeException(backgroundThreadException);
-          //}
-
-          checkPublishAndHandoffFailure();
-
-          // calling getRecord() ensures that exceptions specific to kafka/kinesis like OffsetOutOfRangeException
-          // are handled in the subclasses.
-          List<ReceivedMessage> records = getRecords(
-              recordSupplier,
-              toolbox
-          );
-
-          for (ReceivedMessage record : records) {
-            final boolean shouldProcess = true;
-
-            if (shouldProcess) {
-              try {
-                final List<byte[]> valueBytess = Lists.asList(record.getMessage().getData().toByteArray(), null);
-                final List<InputRow> rows;
-                if (valueBytess == null || valueBytess.isEmpty()) {
-                  rows = Utils.nullableListOf((InputRow) null);
-                } else {
-                  rows = parseBytes(valueBytess);
-                }
-                boolean isPersistRequired = false;
-
-                for (InputRow row : rows) {
-                  if (row != null && task.withinMinMaxRecordTime(row)) {
-                    final AppenderatorDriverAddResult addResult = driver.add(
-                        row,
-                        "todo",
-                        committerSupplier,
-                        true,
-                        // do not allow incremental persists to happen until all the rows from this batch
-                        // of rows are indexed
-                        false
-                    );
-
-                    if (addResult.isOk()) {
-                      // If the number of rows in the segment exceeds the threshold after adding a row,
-                      // move the segment out from the active segments of BaseAppenderatorDriver to make a new segment.
-                      final boolean isPushRequired = addResult.isPushRequired(
-                          tuningConfig.getPartitionsSpec().getMaxRowsPerSegment(),
-                          tuningConfig.getPartitionsSpec()
-                                      .getMaxTotalRowsOr(DynamicPartitionsSpec.DEFAULT_MAX_TOTAL_ROWS)
-                      );
-                      isPersistRequired |= addResult.isPersistRequired();
-                    } else {
-                      // Failure to allocate segment puts determinism at risk, bail out to be safe.
-                      // May want configurable behavior here at some point.
-                      // If we allow continuing, then consider blacklisting the interval for a while to avoid constant checks.
-                      throw new ISE("Could not allocate segment for row with timestamp[%s]", row.getTimestamp());
-                    }
-
-                    if (addResult.getParseException() != null) {
-                      handleParseException(addResult.getParseException(), record);
-                    } else {
-                      rowIngestionMeters.incrementProcessed();
-                    }
-                  } else {
-                    rowIngestionMeters.incrementThrownAway();
-                  }
-                }
-                if (isPersistRequired) {
-                  Futures.addCallback(
-                      driver.persistAsync(committerSupplier.get()),
-                      new FutureCallback<Object>()
-                      {
-                        @Override
-                        public void onSuccess(@Nullable Object result)
-                        {
-                          log.debug("Persist completed with metadata: %s", result);
-                        }
-
-                        @Override
-                        public void onFailure(Throwable t)
-                        {
-                          log.error("Persist failed, dying");
-                          // backgroundThreadException = t;
-                        }
-                      }
-                  );
-                }
-              }
-              catch (ParseException e) {
-                handleParseException(e, record);
-              }
-            }
-          }
-
-          if (stillReading) {
-            requestPause();
-          }
-        }
-        ingestionState = IngestionState.COMPLETED;
+        log.info("pubsub sleeping");
+        Thread.sleep(2000);
       }
       catch (Exception e) {
-        // (1) catch all exceptions while reading from pubsub
-        caughtExceptionInner = e;
-        log.error(e, "Encountered exception in run() before persisting.");
-        throw e;
-      }
-      finally {
-        try {
-          driver.persist(committerSupplier.get()); // persist pending data
-        }
-        catch (Exception e) {
-          if (caughtExceptionInner != null) {
-            caughtExceptionInner.addSuppressed(e);
-          } else {
-            throw e;
-          }
-        }
-      }
-
-      /*synchronized (statusLock) {
-        if (stopRequested.get() && !publishOnStop.get()) {
-          throw new InterruptedException("Stopping without publishing");
-        }
-
-        status = Status.PUBLISHING;
-      }*/
-
-      // publishAndRegisterHandoff(sequenceMetadata);
-
-      // if (backgroundThreadException != null) {
-      //  throw new RuntimeException(backgroundThreadException);
-      // }
-
-      // Wait for publish futures to complete.
-      // Futures.allAsList(publishWaitList).get();
-
-      // Wait for handoff futures to complete.
-      // Note that every publishing task (created by calling AppenderatorDriver.publish()) has a corresponding
-      // handoffFuture. handoffFuture can throw an exception if 1) the corresponding publishFuture failed or 2) it
-      // failed to persist sequences. It might also return null if handoff failed, but was recoverable.
-      // See publishAndRegisterHandoff() for details.
-      List<SegmentsAndMetadata> handedOffList = Collections.emptyList();
-      /*if (tuningConfig.getHandoffConditionTimeout() == 0) {
-        handedOffList = Futures.allAsList(handOffWaitList).get();
-      } else {
-        try {
-          handedOffList = Futures.allAsList(handOffWaitList)
-                                 .get(tuningConfig.getHandoffConditionTimeout(), TimeUnit.MILLISECONDS);
-        }
-        catch (TimeoutException e) {
-          // Handoff timeout is not an indexing failure, but coordination failure. We simply ignore timeout exception
-          // here.
-          log.makeAlert("Timeout waiting for handoff")
-             .addData("taskId", task.getId())
-             .addData("handoffConditionTimeout", tuningConfig.getHandoffConditionTimeout())
-             .emit();
-        }
-      }*/
-
-      for (SegmentsAndMetadata handedOff : handedOffList) {
-        log.info(
-            "Handoff complete for segments: %s",
-            String.join(", ", Lists.transform(handedOff.getSegments(), DataSegment::toString))
-        );
-      }
-
-      appenderator.close();
-    }
-    catch (InterruptedException | RejectedExecutionException e) {
-      // (2) catch InterruptedException and RejectedExecutionException thrown for the whole ingestion steps including
-      // the final publishing.
-      caughtExceptionOuter = e;
-      try {
-        // Futures.allAsList(publishWaitList).cancel(true);
-        // Futures.allAsList(handOffWaitList).cancel(true);
-        if (appenderator != null) {
-          appenderator.closeNow();
-        }
-      }
-      catch (Exception e2) {
-        e.addSuppressed(e2);
-      }
-
-      // handle the InterruptedException that gets wrapped in a RejectedExecutionException
-      if (e instanceof RejectedExecutionException
-          && (e.getCause() == null || !(e.getCause() instanceof InterruptedException))) {
-        throw e;
-      }
-
-      // if we were interrupted because we were asked to stop, handle the exception and return success, else rethrow
-      if (!stopRequested.get()) {
-        Thread.currentThread().interrupt();
-        throw e;
+        break;
       }
     }
-    catch (Exception e) {
-      // (3) catch all other exceptions thrown for the whole ingestion steps including the final publishing.
-      caughtExceptionOuter = e;
-      /*try {
-        Futures.allAsList(publishWaitList).cancel(true);
-        Futures.allAsList(handOffWaitList).cancel(true);
-        if (appenderator != null) {
-          appenderator.closeNow();
-        }
-      }
-      catch (Exception e2) {
-        e.addSuppressed(e2);
-      }*/
-      throw e;
-    }
-    finally {
-      try {
-
-        if (driver != null) {
-          driver.close();
-        }
-        if (chatHandlerProvider.isPresent()) {
-          chatHandlerProvider.get().unregister(task.getId());
-        }
-
-        if (appenderatorsManager.shouldTaskMakeNodeAnnouncements()) {
-          toolbox.getDruidNodeAnnouncer().unannounce(discoveryDruidNode);
-          toolbox.getDataSegmentServerAnnouncer().unannounce();
-        }
-      }
-      catch (Throwable e) {
-        if (caughtExceptionOuter != null) {
-          caughtExceptionOuter.addSuppressed(e);
-        } else {
-          throw e;
-        }
-      }
-    }
-
-    // toolbox.getTaskReportFileWriter().write(task.getId(), getTaskCompletionReports(null));
     return TaskStatus.success(task.getId());
+  }
+
+  public Appenderator getAppenderator()
+  {
+    return appenderator;
   }
 
   /**

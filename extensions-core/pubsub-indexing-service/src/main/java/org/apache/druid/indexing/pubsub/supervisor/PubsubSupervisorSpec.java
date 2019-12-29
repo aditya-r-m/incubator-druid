@@ -34,6 +34,7 @@ import org.apache.druid.indexing.overlord.supervisor.Supervisor;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorSpec;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManagerConfig;
 import org.apache.druid.indexing.pubsub.PubsubIndexTaskClientFactory;
+import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.server.metrics.DruidMonitorSchedulerConfig;
@@ -44,6 +45,7 @@ import java.util.Map;
 
 public class PubsubSupervisorSpec implements SupervisorSpec
 {
+  private static final Logger log = new Logger(PubsubSupervisorSpec.class);
   private static final String TASK_TYPE = "pubsub";
   protected final TaskStorage taskStorage;
   protected final TaskMaster taskMaster;
@@ -89,6 +91,9 @@ public class PubsubSupervisorSpec implements SupervisorSpec
                                ? tuningConfig
                                : PubsubSupervisorTuningConfig.defaultConfig()
                            );
+    log.error("loggin spec");
+    log.error(this.ingestionSchema.toString());
+    log.error(this.ingestionSchema.getDataSchema().toString());
     this.context = context;
 
     this.taskStorage = taskStorage;

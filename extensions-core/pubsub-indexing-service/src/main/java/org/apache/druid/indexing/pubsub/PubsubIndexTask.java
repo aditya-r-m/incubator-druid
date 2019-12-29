@@ -103,11 +103,14 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
   {
     super(
         id,
-        StringUtils.format("%s_%s", TYPE, dataSchema.getDataSource()),
+        StringUtils.format("%s_%s", TYPE, "wikipedia"),
         taskResource,
-        dataSchema.getDataSource(),
+        "wikipedia",
         context
     );
+    log.error("creating pubsub task");
+    log.error(dataSchema.toString());
+    log.error(dataSchema.getDataSource());
     this.configMapper = configMapper;
 
     this.dataSchema = Preconditions.checkNotNull(dataSchema, "dataSchema");
@@ -127,6 +130,7 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
     this.lockGranularityToUse = getContextValue(Tasks.FORCE_TIME_CHUNK_LOCK_KEY, Tasks.DEFAULT_FORCE_TIME_CHUNK_LOCK)
                                 ? LockGranularity.TIME_CHUNK
                                 : LockGranularity.SEGMENT;
+    log.info("created pubsub task");
   }
 
   long getPollRetryMs()
@@ -224,7 +228,7 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
   @Override
   public boolean isReady(TaskActionClient taskActionClient) throws Exception
   {
-    return false;
+    return true;
   }
 
   @Override
@@ -236,9 +240,20 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
   @Override
   public TaskStatus run(TaskToolbox toolbox) throws Exception
   {
-    return null;
+    return getRunner().run(toolbox);
   }
 
+  public Appenderator getAppenderator()
+  {
+    return getRunner().getAppenderator();
+  }
+
+  public PubsubIndexTaskRunner getRunner()
+  {
+    return runnerSupplier.get();
+  }
+
+  @JsonProperty
   public DataSchema getDataSchema()
   {
     return dataSchema;
