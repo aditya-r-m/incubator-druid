@@ -76,23 +76,23 @@ public class PubsubRecordSupplier implements Closeable
         PullResponse pullResponse = subscriber.pullCallable().call(pullRequest);
         List<String> ackIds = new ArrayList<>();
         for (ReceivedMessage message : pullResponse.getReceivedMessagesList()) {
-          // handle received message
-          // ...
           ackIds.add(message.getAckId());
         }
-        // acknowledge received messages
-        AcknowledgeRequest acknowledgeRequest =
-            AcknowledgeRequest.newBuilder()
-                              .setSubscription(subscriptionName)
-                              .addAllAckIds(ackIds)
-                              .build();
-        // use acknowledgeCallable().futureCall to asynchronously perform this operation
-        subscriber.acknowledgeCallable().call(acknowledgeRequest);
+        if (ackIds.size() > 0) {
+          // acknowledge received messages
+          AcknowledgeRequest acknowledgeRequest =
+              AcknowledgeRequest.newBuilder()
+                                .setSubscription(subscriptionName)
+                                .addAllAckIds(ackIds)
+                                .build();
+          // use acknowledgeCallable().futureCall to asynchronously perform this operation
+          subscriber.acknowledgeCallable().call(acknowledgeRequest);
+        }
         return pullResponse.getReceivedMessagesList();
       }
     }
     catch (IOException e) {
-      log.error("failed to get the data my dude " + e);
+      log.error("failed to get the data " + e);
     }
     return null;
   }

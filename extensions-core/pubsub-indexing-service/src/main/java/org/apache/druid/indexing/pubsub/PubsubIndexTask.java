@@ -103,9 +103,9 @@ public class PubsubIndexTask extends AbstractTask implements ChatHandler
   {
     super(
         id,
-        StringUtils.format("%s_%s", TYPE, "wikipedia"),
+        StringUtils.format("%s_%s", TYPE, dataSchema.getDataSource()),
         taskResource,
-        "wikipedia",
+        dataSchema.getDataSource(),
         context
     );
     log.error("creating pubsub task");

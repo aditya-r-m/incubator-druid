@@ -21,35 +21,56 @@ package org.apache.druid.indexing.pubsub;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Function;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
 import com.google.pubsub.v1.ReceivedMessage;
+import org.apache.druid.data.input.Committer;
 import org.apache.druid.data.input.InputEntityReader;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.InputRowSchema;
 import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.data.input.impl.InputRowParser;
+import org.apache.druid.discovery.DiscoveryDruidNode;
+import org.apache.druid.discovery.LookupNodeService;
+import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.indexer.IngestionState;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.LockGranularity;
+import org.apache.druid.indexing.common.TaskLockType;
+import org.apache.druid.indexing.common.TaskRealtimeMetricsMonitorBuilder;
 import org.apache.druid.indexing.common.TaskToolbox;
+import org.apache.druid.indexing.common.actions.SegmentLockAcquireAction;
+import org.apache.druid.indexing.common.actions.TimeChunkLockAcquireAction;
 import org.apache.druid.indexing.common.stats.RowIngestionMeters;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
+import org.apache.druid.indexing.common.task.RealtimeIndexTask;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
-import org.apache.druid.java.util.common.parsers.ParseException;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.segment.indexing.RealtimeIOConfig;
+import org.apache.druid.segment.realtime.FireDepartment;
+import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.segment.realtime.appenderator.Appenderator;
+import org.apache.druid.segment.realtime.appenderator.AppenderatorDriverAddResult;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
 import org.apache.druid.segment.realtime.appenderator.SegmentsAndMetadata;
 import org.apache.druid.segment.realtime.appenderator.StreamAppenderatorDriver;
 import org.apache.druid.segment.realtime.firehose.ChatHandler;
 import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
 import org.apache.druid.server.security.AuthorizerMapper;
+import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.utils.CircularBuffer;
 import org.joda.time.DateTime;
 
@@ -70,7 +91,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
@@ -218,21 +238,111 @@ public class PubsubIndexTaskRunner implements ChatHandler
 
   private TaskStatus runInternal(TaskToolbox toolbox) throws Exception
   {
+    setToolbox(toolbox);
     log.info("pubsub attempt");
     PubsubRecordSupplier recordSupplier = task.newTaskRecordSupplier();
     List<ReceivedMessage> records = getRecords(recordSupplier, toolbox);
     log.info("pubsub success");
     log.info(records.size() + "");
     log.info(records.toString());
-    while (true) {
-      try {
-        log.info("pubsub sleeping");
-        Thread.sleep(2000);
-      }
-      catch (Exception e) {
-        break;
+
+    // Set up FireDepartmentMetrics
+    final FireDepartment fireDepartmentForMetrics = new FireDepartment(
+        task.getDataSchema(),
+        new RealtimeIOConfig(null, null),
+        null
+    );
+    FireDepartmentMetrics fireDepartmentMetrics = fireDepartmentForMetrics.getMetrics();
+    toolbox.getMonitorScheduler()
+           .addMonitor(TaskRealtimeMetricsMonitorBuilder.build(task, fireDepartmentForMetrics, rowIngestionMeters));
+
+    final String lookupTier = task.getContextValue(RealtimeIndexTask.CTX_KEY_LOOKUP_TIER);
+    final LookupNodeService lookupNodeService = lookupTier == null ?
+                                                toolbox.getLookupNodeService() :
+                                                new LookupNodeService(lookupTier);
+
+    final DiscoveryDruidNode discoveryDruidNode = new DiscoveryDruidNode(
+        toolbox.getDruidNode(),
+        NodeRole.PEON,
+        ImmutableMap.of(
+            toolbox.getDataNodeService().getName(), toolbox.getDataNodeService(),
+            lookupNodeService.getName(), lookupNodeService
+        )
+    );
+
+    if (appenderatorsManager.shouldTaskMakeNodeAnnouncements()) {
+      toolbox.getDataSegmentServerAnnouncer().announce();
+      toolbox.getDruidNodeAnnouncer().announce(discoveryDruidNode);
+    }
+    appenderator = task.newAppenderator(fireDepartmentMetrics, toolbox);
+    driver = task.newDriver(appenderator, toolbox, fireDepartmentMetrics);
+    final Object restoredMetadata = driver.startJob(
+        segmentId -> {
+          try {
+            if (lockGranularityToUse == LockGranularity.SEGMENT) {
+              return toolbox.getTaskActionClient().submit(
+                  new SegmentLockAcquireAction(
+                      TaskLockType.EXCLUSIVE,
+                      segmentId.getInterval(),
+                      segmentId.getVersion(),
+                      segmentId.getShardSpec().getPartitionNum(),
+                      1000L
+                  )
+              ).isOk();
+            } else {
+              return toolbox.getTaskActionClient().submit(
+                  new TimeChunkLockAcquireAction(
+                      TaskLockType.EXCLUSIVE,
+                      segmentId.getInterval(),
+                      1000L
+                  )
+              ) != null;
+            }
+          }
+          catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+        }
+    );
+
+    // Set up committer.
+    final Supplier<Committer> committerSupplier = () -> {
+      return new Committer()
+      {
+        @Override
+        public Object getMetadata()
+        {
+          // Do nothing.
+          return ImmutableMap.of();
+        }
+
+        @Override
+        public void run()
+        {
+          // Do nothing.
+        }
+      };
+    };
+    for (ReceivedMessage record : records) {
+      List<InputRow> rows = parseBytes(Arrays.asList(record.getMessage().getData().toByteArray()));
+      for (InputRow row : rows) {
+        final AppenderatorDriverAddResult addResult = driver.add(
+            row,
+            getSequenceName(),
+            committerSupplier,
+            true,
+            // do not allow incremental persists to happen until all the rows from this batch
+            // of rows are indexed
+            false
+        );
+        if (!addResult.isOk()) {
+          throw new ISE("failed to add row %s", row);
+        }
       }
     }
+    driver.persist(committerSupplier.get());
+    publishAndRegisterHandoff(committerSupplier.get());
+    driver.close();
     return TaskStatus.success(task.getId());
   }
 
@@ -241,75 +351,90 @@ public class PubsubIndexTaskRunner implements ChatHandler
     return appenderator;
   }
 
-  /**
-   * Checks if the pauseRequested flag was set and if so blocks:
-   * a) if pauseMillis == PAUSE_FOREVER, until pauseRequested is cleared
-   * b) if pauseMillis != PAUSE_FOREVER, until pauseMillis elapses -or- pauseRequested is cleared
-   * <p>
-   * If pauseMillis is changed while paused, the new pause timeout will be applied. This allows adjustment of the
-   * pause timeout (making a timed pause into an indefinite pause and vice versa is valid) without having to resume
-   * and ensures that the loop continues to stay paused without ingesting any new events. You will need to signal
-   * shouldResume after adjusting pauseMillis for the new value to take effect.
-   * <p>
-   * Sets paused = true and signals paused so callers can be notified when the pause command has been accepted.
-   * <p>
-   * Additionally, pauses if all partitions assignments have been read and pauseAfterRead flag is set.
-   *
-   * @return true if a pause request was handled, false otherwise
-   */
-  private boolean possiblyPause() throws InterruptedException
+  public String getSequenceName()
   {
-    pauseLock.lockInterruptibly();
-    try {
-      if (pauseRequested) {
-        status = Status.PAUSED;
-        hasPaused.signalAll();
-
-        while (pauseRequested) {
-          log.debug("Received pause command, pausing ingestion until resumed.");
-          shouldResume.await();
-        }
-
-        status = Status.READING;
-        shouldResume.signalAll();
-        log.debug("Received resume command, resuming ingestion.");
-        return true;
-      }
-    }
-    finally {
-      pauseLock.unlock();
-    }
-
-    return false;
+    return "pubsub-sequence";
   }
 
-  private void checkPublishAndHandoffFailure() throws ExecutionException, InterruptedException
+  private void publishAndRegisterHandoff(Committer committer)
   {
-    // Check if any publishFuture failed.
-    final List<ListenableFuture<SegmentsAndMetadata>> publishFinished = publishWaitList
-        .stream()
-        .filter(Future::isDone)
-        .collect(Collectors.toList());
+    final ListenableFuture<SegmentsAndMetadata> publishFuture = Futures.transform(
+        driver.publish(
+            new PubsubTransactionalSegmentPublisher(this, toolbox, false),
+            committer,
+            Arrays.asList(getSequenceName())
+        ),
+        publishedSegmentsAndMetadata -> {
+          if (publishedSegmentsAndMetadata == null) {
+            throw new ISE(
+                "Transaction failure publishing segments for sequence"
+            );
+          } else {
+            return publishedSegmentsAndMetadata;
+          }
+        }
+    );
 
-    for (ListenableFuture<SegmentsAndMetadata> publishFuture : publishFinished) {
-      // If publishFuture failed, the below line will throw an exception and catched by (1), and then (2) or (3).
+    // Create a handoffFuture for every publishFuture. The created handoffFuture must fail if publishFuture fails.
+    final SettableFuture<SegmentsAndMetadata> handoffFuture = SettableFuture.create();
+
+    Futures.addCallback(
+        publishFuture,
+        new FutureCallback<SegmentsAndMetadata>()
+        {
+          @Override
+          public void onSuccess(SegmentsAndMetadata publishedSegmentsAndMetadata)
+          {
+            log.info(
+                "Published segments [%s] for sequence [%s] with metadata [%s].",
+                String.join(", ", Lists.transform(publishedSegmentsAndMetadata.getSegments(), DataSegment::toString)),
+                getSequenceName(),
+                Preconditions.checkNotNull(publishedSegmentsAndMetadata.getCommitMetadata(), "commitMetadata")
+            );
+
+            Futures.transform(
+                driver.registerHandoff(publishedSegmentsAndMetadata),
+                new Function<SegmentsAndMetadata, Void>()
+                {
+                  @Nullable
+                  @Override
+                  public Void apply(@Nullable SegmentsAndMetadata handoffSegmentsAndMetadata)
+                  {
+                    if (handoffSegmentsAndMetadata == null) {
+                      log.warn(
+                          "Failed to hand off segments: %s",
+                          String.join(
+                              ", ",
+                              Lists.transform(publishedSegmentsAndMetadata.getSegments(), DataSegment::toString)
+                          )
+                      );
+                    }
+                    handoffFuture.set(handoffSegmentsAndMetadata);
+                    return null;
+                  }
+                }
+            );
+          }
+
+          @Override
+          public void onFailure(Throwable t)
+          {
+            log.error(t, "Error while publishing segments for sequenceNumber");
+            handoffFuture.setException(t);
+          }
+        }
+    );
+
+    try {
       publishFuture.get();
-    }
-
-    publishWaitList.removeAll(publishFinished);
-
-    // Check if any handoffFuture failed.
-    final List<ListenableFuture<SegmentsAndMetadata>> handoffFinished = handOffWaitList
-        .stream()
-        .filter(Future::isDone)
-        .collect(Collectors.toList());
-
-    for (ListenableFuture<SegmentsAndMetadata> handoffFuture : handoffFinished) {
-      // If handoffFuture failed, the below line will throw an exception and catched by (1), and then (2) or (3).
       handoffFuture.get();
     }
-
-    handOffWaitList.removeAll(handoffFinished);
+    catch (InterruptedException e) {
+      log.error(e, "pubsub error");
+    }
+    catch (ExecutionException e) {
+      log.error(e, "pubsub error");
+    }
   }
 
   private List<InputRow> parseBytes(List<byte[]> valueBytess) throws IOException
@@ -346,27 +471,6 @@ public class PubsubIndexTaskRunner implements ChatHandler
       }
     }
     return rows;
-  }
-
-  private void handleParseException(ParseException e, Object record)
-  {
-    if (e.isFromPartiallyValidRow()) {
-      rowIngestionMeters.incrementProcessedWithError();
-    } else {
-      rowIngestionMeters.incrementUnparseable();
-    }
-
-    if (tuningConfig.isLogParseExceptions()) {
-    }
-
-    if (savedParseExceptions != null) {
-      savedParseExceptions.add(e);
-    }
-
-    if (rowIngestionMeters.getUnparseable() + rowIngestionMeters.getProcessedWithError()
-        > tuningConfig.getMaxParseExceptions()) {
-      throw new RuntimeException("Max parse exceptions exceeded");
-    }
   }
 
   @GET
